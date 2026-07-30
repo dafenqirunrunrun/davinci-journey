@@ -1,0 +1,52 @@
+import type { ArchiveProfile } from "@davinci-journey/classification";
+
+export const initialArchiveProfiles: ArchiveProfile[] = [
+  {
+    id: "ai-agent-langgraph",
+    name: "AI Agent / LangGraph",
+    category: "AI Agent",
+    topic: "LangGraph",
+    directory: "content/ai-agent/langgraph",
+    defaultTags: ["AI Agent", "LangGraph"]
+  },
+  {
+    id: "ai-agent-memory",
+    name: "AI Agent / Memory",
+    category: "AI Agent",
+    topic: "Memory",
+    directory: "content/ai-agent/memory",
+    defaultTags: ["AI Agent", "Memory"]
+  },
+  {
+    id: "rag-retrieval",
+    name: "RAG / Retrieval",
+    category: "RAG",
+    topic: "Retrieval",
+    directory: "content/rag/retrieval",
+    defaultTags: ["RAG", "Retrieval"]
+  },
+  {
+    id: "rag-evaluation",
+    name: "RAG / Evaluation",
+    category: "RAG",
+    topic: "Evaluation",
+    directory: "content/rag/evaluation",
+    defaultTags: ["RAG", "Evaluation"]
+  },
+  {
+    id: "backend-python",
+    name: "Backend / Python",
+    category: "Backend",
+    topic: "Python",
+    directory: "content/backend/python",
+    defaultTags: ["Backend", "Python"]
+  },
+  {
+    id: "uncategorized",
+    name: "其他 / 待整理",
+    category: "Other",
+    topic: "Uncategorized",
+    directory: "content/other/uncategorized",
+    defaultTags: []
+  }
+];

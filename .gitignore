@@ -1,0 +1,11 @@
+node_modules/
+dist/
+apps/*/dist/
+packages/*/dist/
+.vite/
+coverage/
+desktop-dev-server*.log
+.tmp/
+.cache/
+publish-workspaces/
+apps/desktop/src-tauri/target/
