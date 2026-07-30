@@ -59,6 +59,9 @@ importers:
       '@davinci-journey/markdown-core':
         specifier: workspace:*
         version: link:../../packages/markdown-core
+      '@tauri-apps/api':
+        specifier: ^2.5.0
+        version: 2.11.1
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -507,6 +510,9 @@ packages:
     resolution: {integrity: sha512-MOG/3gTOn4Fwf574RVOaY61I5o6P90legkFADiTyn1hyjNydT+cerU2rLUwPdZkKKyJ+iT+K9p7WXK4LM1Ka6g==}
     cpu: [x64]
     os: [win32]
+
+  '@tauri-apps/api@2.11.1':
+    resolution: {integrity: sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==}
 
   '@testing-library/dom@10.4.1':
     resolution: {integrity: sha512-o4PXJQidqJl82ckFaXUeoAW+XysPLauYI43Abki5hABd853iMhitooc6znOnczgbTYmEP6U6/y1ZyKAIsvMKGg==}
@@ -1690,6 +1696,8 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.62.3':
     optional: true
+
+  '@tauri-apps/api@2.11.1': {}
 
   '@testing-library/dom@10.4.1':
     dependencies:

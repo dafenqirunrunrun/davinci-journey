@@ -8,4 +8,5 @@ desktop-dev-server*.log
 .tmp/
 .cache/
 publish-workspaces/
+/.publish-workspaces/
 apps/desktop/src-tauri/target/

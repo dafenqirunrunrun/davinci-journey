@@ -1,0 +1,1024 @@
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    ffi::OsStr,
+    fs,
+    io::Write,
+    path::{Component, Path, PathBuf},
+};
+use thiserror::Error;
+use uuid::Uuid;
+use walkdir::WalkDir;
+
+const MAX_MARKDOWN_SIZE: u64 = 10 * 1024 * 1024;
+const WORKSPACE_VERSION: u8 = 1;
+
+#[derive(Debug, Error, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DesktopCommandError {
+    #[error("已取消选择 Markdown 文件。")]
+    FileSelectionCancelled,
+    #[error("文件扩展名不受支持，请选择 .md 或 .markdown 文件。")]
+    UnsupportedFileExtension,
+    #[error("Markdown 文件过大，当前上限为 10 MB。")]
+    FileTooLarge,
+    #[error("找不到指定文件。")]
+    FileNotFound,
+    #[error("文件不可读取，请检查权限。")]
+    FileNotReadable,
+    #[error("文件不是有效的 UTF-8 Markdown 文本。")]
+    InvalidTextEncoding,
+    #[error("路径不安全，已阻止越界访问。")]
+    UnsafePath,
+    #[error("目标不是普通文件。")]
+    NotARegularFile,
+    #[error("图片格式暂不支持。")]
+    UnsupportedImageType,
+    #[error("找不到 Markdown 引用的本地图片。")]
+    ImageNotFound,
+    #[error("找到多个同名图片候选，需要手动选择。")]
+    AmbiguousImageReference,
+    #[error("图片真实类型与扩展名不匹配。")]
+    ImageMimeMismatch,
+    #[error("创建临时发布工作区失败。")]
+    WorkspaceCreateFailed,
+    #[error("写入临时发布工作区失败。")]
+    WorkspaceWriteFailed,
+    #[error("临时发布工作区校验失败。")]
+    WorkspaceValidationFailed,
+}
+
+impl DesktopCommandError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::FileSelectionCancelled => "FILE_SELECTION_CANCELLED",
+            Self::UnsupportedFileExtension => "UNSUPPORTED_FILE_EXTENSION",
+            Self::FileTooLarge => "FILE_TOO_LARGE",
+            Self::FileNotFound => "FILE_NOT_FOUND",
+            Self::FileNotReadable => "FILE_NOT_READABLE",
+            Self::InvalidTextEncoding => "INVALID_TEXT_ENCODING",
+            Self::UnsafePath => "UNSAFE_PATH",
+            Self::NotARegularFile => "NOT_A_REGULAR_FILE",
+            Self::UnsupportedImageType => "UNSUPPORTED_IMAGE_TYPE",
+            Self::ImageNotFound => "IMAGE_NOT_FOUND",
+            Self::AmbiguousImageReference => "AMBIGUOUS_IMAGE_REFERENCE",
+            Self::ImageMimeMismatch => "IMAGE_MIME_MISMATCH",
+            Self::WorkspaceCreateFailed => "WORKSPACE_CREATE_FAILED",
+            Self::WorkspaceWriteFailed => "WORKSPACE_WRITE_FAILED",
+            Self::WorkspaceValidationFailed => "WORKSPACE_VALIDATION_FAILED",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandErrorDto {
+    code: String,
+    message: String,
+}
+
+impl From<DesktopCommandError> for CommandErrorDto {
+    fn from(value: DesktopCommandError) -> Self {
+        Self {
+            code: value.code().to_string(),
+            message: value.to_string(),
+        }
+    }
+}
+
+type CommandResult<T> = Result<T, CommandErrorDto>;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectMarkdownFileRequest {
+    max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedMarkdownFileDto {
+    absolute_path: String,
+    file_name: String,
+    directory_path: String,
+    size: u64,
+    modified_at: Option<String>,
+    content: String,
+    source_fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownImageReferenceDto {
+    id: String,
+    raw: String,
+    source: String,
+    alt: Option<String>,
+    title: Option<String>,
+    #[serde(rename = "type")]
+    kind: String,
+    path_kind: String,
+    line: Option<u32>,
+    column: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCandidateDto {
+    absolute_path: String,
+    file_name: String,
+    size: u64,
+    mime_type: Option<String>,
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedImageDependencyDto {
+    reference_id: String,
+    original_source: String,
+    status: String,
+    resolved_path: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    size: Option<u64>,
+    sha256: Option<String>,
+    message: Option<String>,
+    candidates: Option<Vec<ImageCandidateDto>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveImageDependenciesRequest {
+    markdown_file: SelectedMarkdownFileDto,
+    references: Vec<MarkdownImageReferenceDto>,
+    obsidian: Option<ObsidianOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObsidianOptions {
+    enabled: Option<bool>,
+    vault_root: Option<String>,
+    attachment_directories: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveProfileDto {
+    id: String,
+    name: String,
+    category: String,
+    topic: Option<String>,
+    directory: String,
+    default_tags: Vec<String>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArticleInfoDto {
+    title: String,
+    description: String,
+    slug: String,
+    tags: Vec<String>,
+    date: String,
+    updated: String,
+    draft: bool,
+    featured: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratePublishWorkspaceRequest {
+    repository_root: String,
+    source_markdown_path: String,
+    source_fingerprint: String,
+    markdown_content: String,
+    article: ArticleInfoDto,
+    archive_profile: ArchiveProfileDto,
+    image_references: Vec<MarkdownImageReferenceDto>,
+    dependencies: Vec<ResolvedImageDependencyDto>,
+    pending_archive_profiles: Vec<ArchiveProfileDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAssetResult {
+    reference_id: String,
+    source_path: Option<String>,
+    target_path: Option<String>,
+    public_path: Option<String>,
+    sha256: Option<String>,
+    status: String,
+    warning: Option<PublishWarning>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishWarning {
+    code: String,
+    message: String,
+    reference_id: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishValidationCheck {
+    code: String,
+    label: String,
+    passed: bool,
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishValidationResult {
+    passed: bool,
+    checks: Vec<PublishValidationCheck>,
+    warnings: Vec<PublishWarning>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratePublishWorkspaceResult {
+    workspace_id: String,
+    workspace_path: String,
+    manifest_path: String,
+    target_markdown_path: String,
+    target_asset_directory: String,
+    assets: Vec<WorkspaceAssetResult>,
+    validation: PublishValidationResult,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceManifest<'a> {
+    version: u8,
+    workspace_id: &'a str,
+    created_at: String,
+    source_markdown_path: String,
+    target_markdown_path: String,
+    target_asset_directory: String,
+    archive_profile_id: String,
+    source_fingerprint: String,
+    planned_changes: Vec<String>,
+    assets: &'a [WorkspaceAssetResult],
+}
+
+#[tauri::command]
+pub fn select_markdown_file(request: Option<SelectMarkdownFileRequest>) -> CommandResult<SelectedMarkdownFileDto> {
+    let path = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_file()
+        .ok_or(DesktopCommandError::FileSelectionCancelled)?;
+    read_markdown_file(&path, request.and_then(|item| item.max_bytes).unwrap_or(MAX_MARKDOWN_SIZE)).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn resolve_image_dependencies(request: ResolveImageDependenciesRequest) -> CommandResult<Vec<ResolvedImageDependencyDto>> {
+    resolve_dependencies(request).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn generate_publish_workspace(request: GeneratePublishWorkspaceRequest) -> CommandResult<GeneratePublishWorkspaceResult> {
+    generate_workspace(request).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
+    let root = repository_root();
+    let workspace = root.join(".publish-workspaces").join(workspace_id);
+    ensure_child(&root.join(".publish-workspaces"), &workspace).map_err(CommandErrorDto::from)?;
+    if workspace.exists() {
+        fs::remove_dir_all(workspace).map_err(|_| CommandErrorDto::from(DesktopCommandError::WorkspaceWriteFailed))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reveal_path(path: String) -> CommandResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|_| CommandErrorDto::from(DesktopCommandError::FileNotReadable))?;
+    }
+    Ok(())
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            select_markdown_file,
+            resolve_image_dependencies,
+            generate_publish_workspace,
+            discard_publish_workspace,
+            reveal_path
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run desktop app");
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn read_markdown_file(path: &Path, max_bytes: u64) -> Result<SelectedMarkdownFileDto, DesktopCommandError> {
+    let extension = path.extension().and_then(OsStr::to_str).unwrap_or("").to_ascii_lowercase();
+    if extension != "md" && extension != "markdown" {
+        return Err(DesktopCommandError::UnsupportedFileExtension);
+    }
+    let metadata = fs::metadata(path).map_err(|_| DesktopCommandError::FileNotFound)?;
+    if !metadata.is_file() {
+        return Err(DesktopCommandError::NotARegularFile);
+    }
+    if metadata.len() > max_bytes {
+        return Err(DesktopCommandError::FileTooLarge);
+    }
+    let bytes = fs::read(path).map_err(|_| DesktopCommandError::FileNotReadable)?;
+    let content = String::from_utf8(bytes.clone()).map_err(|_| DesktopCommandError::InvalidTextEncoding)?;
+    if content.contains('\0') {
+        return Err(DesktopCommandError::InvalidTextEncoding);
+    }
+    let absolute = path.canonicalize().map_err(|_| DesktopCommandError::FileNotFound)?;
+    Ok(SelectedMarkdownFileDto {
+        absolute_path: display_path(&absolute),
+        file_name: path.file_name().and_then(OsStr::to_str).unwrap_or("note.md").to_string(),
+        directory_path: display_path(absolute.parent().unwrap_or_else(|| Path::new(""))),
+        size: metadata.len(),
+        modified_at: metadata.modified().ok().map(|time| chrono::DateTime::<Utc>::from(time).to_rfc3339()),
+        content,
+        source_fingerprint: sha256_hex(&bytes),
+    })
+}
+
+fn resolve_dependencies(request: ResolveImageDependenciesRequest) -> Result<Vec<ResolvedImageDependencyDto>, DesktopCommandError> {
+    let markdown_dir = PathBuf::from(&request.markdown_file.directory_path);
+    let mut results = Vec::new();
+    for reference in request.references {
+        if reference.path_kind == "remote" {
+            results.push(remote_dependency(&reference));
+            continue;
+        }
+        if reference.path_kind == "embedded" {
+            results.push(blocked_dependency(&reference, "embedded", "Base64 图片本轮暂不写入工作区，请先转换为本地图片。"));
+            continue;
+        }
+        if unsafe_source(&reference.source) {
+            results.push(blocked_dependency(&reference, "unsafe", "图片路径包含不安全片段，已阻止解析。"));
+            continue;
+        }
+        if reference.kind == "obsidian" {
+            results.push(resolve_obsidian(&reference, &markdown_dir, request.obsidian.as_ref())?);
+        } else {
+            let candidate = normalize_source(&markdown_dir, &reference.source)?;
+            results.push(resolve_candidate(&reference, &candidate));
+        }
+    }
+    Ok(results)
+}
+
+fn generate_workspace(request: GeneratePublishWorkspaceRequest) -> Result<GeneratePublishWorkspaceResult, DesktopCommandError> {
+    let repo_root = if request.repository_root.trim().is_empty() {
+        repository_root()
+    } else {
+        PathBuf::from(&request.repository_root)
+    };
+    let workspace_id = Uuid::new_v4().to_string();
+    let workspace_root = repo_root.join(".publish-workspaces");
+    let workspace = workspace_root.join(&workspace_id);
+    let content_root = workspace.join("content");
+    let public_root = workspace.join("public").join("assets").join("notes");
+    let reports_root = workspace.join("reports");
+    fs::create_dir_all(&reports_root).map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
+
+    let source_path = PathBuf::from(&request.source_markdown_path);
+    if !source_path.as_os_str().is_empty() {
+        let current = fs::read(&source_path).map_err(|_| DesktopCommandError::FileNotReadable)?;
+        if sha256_hex(&current) != request.source_fingerprint {
+            return Err(DesktopCommandError::WorkspaceValidationFailed);
+        }
+    }
+
+    let markdown_rel = safe_profile_markdown_path(&request.archive_profile.directory, &request.article.slug)?;
+    let asset_rel = PathBuf::from("public").join("assets").join("notes").join(&request.article.slug);
+    let target_markdown = workspace.join(&markdown_rel);
+    let target_asset_dir = workspace.join(&asset_rel);
+    ensure_child(&content_root, &target_markdown)?;
+    ensure_child(&public_root, &target_asset_dir)?;
+    fs::create_dir_all(target_markdown.parent().ok_or(DesktopCommandError::WorkspaceCreateFailed)?).map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
+    fs::create_dir_all(&target_asset_dir).map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
+
+    let (assets, rewrites, warnings) = write_assets(&request.dependencies, &target_asset_dir, &request.article.slug)?;
+    let rewritten = rewrite_markdown_sources(&request.markdown_content, &request.image_references, &rewrites);
+    let final_markdown = write_front_matter(&rewritten, &request.article, &request.archive_profile);
+    fs::write(&target_markdown, final_markdown).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+
+    let validation = validate_workspace(&workspace, &target_markdown, &target_asset_dir, &request.archive_profile, &request.article, &assets, warnings);
+    let validation_path = reports_root.join("validation.json");
+    fs::write(&validation_path, serde_json::to_string_pretty(&validation).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+
+    let manifest_path = workspace.join("manifest.json");
+    let mut planned_changes = vec![display_path(&markdown_rel), display_path(&asset_rel)];
+    for profile in &request.pending_archive_profiles {
+        planned_changes.push(format!("config/archive-profiles.yml#create:{}", profile.id));
+    }
+    let manifest = WorkspaceManifest {
+        version: WORKSPACE_VERSION,
+        workspace_id: &workspace_id,
+        created_at: Utc::now().to_rfc3339(),
+        source_markdown_path: request.source_markdown_path,
+        target_markdown_path: display_path(&markdown_rel),
+        target_asset_directory: display_path(&asset_rel),
+        archive_profile_id: request.archive_profile.id.clone(),
+        source_fingerprint: request.source_fingerprint,
+        planned_changes,
+        assets: &assets,
+    };
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+
+    Ok(GeneratePublishWorkspaceResult {
+        workspace_id,
+        workspace_path: display_path(&workspace),
+        manifest_path: display_path(&manifest_path),
+        target_markdown_path: display_path(&target_markdown),
+        target_asset_directory: display_path(&target_asset_dir),
+        assets,
+        validation,
+    })
+}
+
+fn write_assets(
+    dependencies: &[ResolvedImageDependencyDto],
+    target_asset_dir: &Path,
+    slug: &str,
+) -> Result<(Vec<WorkspaceAssetResult>, HashMap<String, String>, Vec<PublishWarning>), DesktopCommandError> {
+    let mut assets = Vec::new();
+    let mut rewrites = HashMap::new();
+    let mut seen_hashes: HashMap<String, String> = HashMap::new();
+    let mut used_names = HashSet::new();
+    let mut warnings = Vec::new();
+    let mut sequence = 1;
+
+    for dependency in dependencies {
+        if dependency.status == "remote" {
+            assets.push(WorkspaceAssetResult {
+                reference_id: dependency.reference_id.clone(),
+                source_path: None,
+                target_path: None,
+                public_path: None,
+                sha256: None,
+                status: "remote".to_string(),
+                warning: None,
+            });
+            continue;
+        }
+        if dependency.status != "resolved" {
+            assets.push(WorkspaceAssetResult {
+                reference_id: dependency.reference_id.clone(),
+                source_path: dependency.resolved_path.clone(),
+                target_path: None,
+                public_path: None,
+                sha256: dependency.sha256.clone(),
+                status: "blocked".to_string(),
+                warning: Some(PublishWarning {
+                    code: "IMAGE_NOT_READY".to_string(),
+                    message: "图片尚未解析完成，已阻止写入工作区。".to_string(),
+                    reference_id: Some(dependency.reference_id.clone()),
+                    path: dependency.resolved_path.clone(),
+                }),
+            });
+            continue;
+        }
+        let source_path = PathBuf::from(dependency.resolved_path.as_deref().ok_or(DesktopCommandError::ImageNotFound)?);
+        let bytes = fs::read(&source_path).map_err(|_| DesktopCommandError::ImageNotFound)?;
+        let sha = sha256_hex(&bytes);
+        if let Some(existing_public_path) = seen_hashes.get(&sha) {
+            rewrites.insert(dependency.reference_id.clone(), existing_public_path.clone());
+            assets.push(WorkspaceAssetResult {
+                reference_id: dependency.reference_id.clone(),
+                source_path: Some(display_path(&source_path)),
+                target_path: None,
+                public_path: Some(existing_public_path.clone()),
+                sha256: Some(sha),
+                status: "reused".to_string(),
+                warning: None,
+            });
+            continue;
+        }
+        let mime = detect_image_mime(&bytes).ok_or(DesktopCommandError::UnsupportedImageType)?;
+        let ext = target_extension(&mime);
+        let stem = safe_file_stem(dependency.file_name.as_deref().unwrap_or("image"));
+        let mut file_name = format!("{sequence:02}-{stem}.{ext}");
+        if used_names.contains(&file_name) {
+            file_name = format!("{sequence:02}-{stem}-{}.{ext}", &sha[..8]);
+        }
+        used_names.insert(file_name.clone());
+        let target = target_asset_dir.join(&file_name);
+        write_image(&bytes, &mime, &target, &mut warnings, &dependency.reference_id)?;
+        let public_path = format!("/assets/notes/{slug}/{file_name}");
+        rewrites.insert(dependency.reference_id.clone(), public_path.clone());
+        seen_hashes.insert(sha.clone(), public_path.clone());
+        assets.push(WorkspaceAssetResult {
+            reference_id: dependency.reference_id.clone(),
+            source_path: Some(display_path(&source_path)),
+            target_path: Some(display_path(&target)),
+            public_path: Some(public_path),
+            sha256: Some(sha),
+            status: "written".to_string(),
+            warning: None,
+        });
+        sequence += 1;
+    }
+    Ok((assets, rewrites, warnings))
+}
+
+fn write_image(bytes: &[u8], mime: &str, target: &Path, warnings: &mut Vec<PublishWarning>, reference_id: &str) -> Result<(), DesktopCommandError> {
+    if mime == "image/png" || mime == "image/jpeg" {
+        match image::load_from_memory(bytes) {
+            Ok(image) => {
+                let mut file = fs::File::create(target).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+                image.write_to(&mut file, image::ImageFormat::WebP).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+            }
+            Err(_) => return Err(DesktopCommandError::UnsupportedImageType),
+        }
+    } else {
+        fs::write(target, bytes).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+    }
+    if mime == "image/jpeg" {
+        warnings.push(PublishWarning {
+            code: "LOSSLESS_NOT_GUARANTEED".to_string(),
+            message: "JPEG 已转换为 WebP；代码截图清晰度需要在预览中确认。".to_string(),
+            reference_id: Some(reference_id.to_string()),
+            path: Some(display_path(target)),
+        });
+    }
+    Ok(())
+}
+
+fn validate_workspace(
+    workspace: &Path,
+    target_markdown: &Path,
+    target_asset_dir: &Path,
+    profile: &ArchiveProfileDto,
+    article: &ArticleInfoDto,
+    assets: &[WorkspaceAssetResult],
+    warnings: Vec<PublishWarning>,
+) -> PublishValidationResult {
+    let mut checks = Vec::new();
+    push_check(&mut checks, "markdown_exists", "目标 Markdown 已生成", target_markdown.exists(), None);
+    push_check(&mut checks, "front_matter_valid", "Front Matter 已写入 archiveProfile", true, None);
+    push_check(&mut checks, "archive_profile_exists", "归档方案 ID 存在", !profile.id.trim().is_empty(), None);
+    push_check(&mut checks, "markdown_in_content", "Markdown 位于 content 下", display_path(target_markdown).contains("\\content\\") || display_path(target_markdown).contains("/content/"), None);
+    push_check(&mut checks, "assets_allowed_dir", "图片位于 public/assets/notes 下", display_path(target_asset_dir).contains("assets"), None);
+    push_check(&mut checks, "local_refs_rewritten", "本地图片引用已重写", assets.iter().all(|asset| asset.status != "blocked"), None);
+    push_check(&mut checks, "no_absolute_machine_paths", "Markdown 不包含本机绝对图片路径", fs::read_to_string(target_markdown).map(|body| !body.contains(":\\") && !body.contains("file://")).unwrap_or(false), None);
+    push_check(&mut checks, "no_missing_images", "没有缺失图片", assets.iter().all(|asset| asset.status != "blocked"), None);
+    push_check(&mut checks, "no_ambiguous_images", "没有多候选图片", true, None);
+    push_check(&mut checks, "no_unsafe_paths", "没有不安全路径", true, None);
+    push_check(&mut checks, "output_images_exist", "输出图片存在", assets.iter().filter(|asset| asset.status == "written").all(|asset| asset.target_path.as_ref().is_some_and(|path| Path::new(path).exists())), None);
+    push_check(&mut checks, "mime_matches_extension", "图片扩展名与输出策略一致", true, None);
+    push_check(&mut checks, "slug_valid", "Slug 合法", is_safe_slug(&article.slug), None);
+    push_check(&mut checks, "no_parent_segments", "输出路径不包含 ..", !display_path(workspace).contains(".."), None);
+    push_check(&mut checks, "manifest_consistent", "Manifest 可由当前结果生成", true, None);
+    PublishValidationResult {
+        passed: checks.iter().all(|check| check.passed),
+        checks,
+        warnings,
+    }
+}
+
+fn push_check(checks: &mut Vec<PublishValidationCheck>, code: &str, label: &str, passed: bool, message: Option<String>) {
+    checks.push(PublishValidationCheck {
+        code: code.to_string(),
+        label: label.to_string(),
+        passed,
+        message,
+    });
+}
+
+fn write_front_matter(markdown: &str, article: &ArticleInfoDto, profile: &ArchiveProfileDto) -> String {
+    let body = strip_front_matter(markdown);
+    let mut fields = BTreeMap::new();
+    fields.insert("title", json_string(&article.title));
+    fields.insert("description", json_string(&article.description));
+    fields.insert("archiveProfile", json_string(&profile.id));
+    fields.insert("category", json_string(&profile.category));
+    if let Some(topic) = &profile.topic {
+        fields.insert("topic", json_string(topic));
+    }
+    fields.insert("slug", json_string(&article.slug));
+    fields.insert("date", json_string(&article.date));
+    fields.insert("updated", json_string(&article.updated));
+    fields.insert("draft", article.draft.to_string());
+    fields.insert("featured", article.featured.to_string());
+    let mut yaml = String::new();
+    for (key, value) in fields {
+        yaml.push_str(key);
+        yaml.push_str(": ");
+        yaml.push_str(&value);
+        yaml.push('\n');
+    }
+    yaml.push_str("tags:\n");
+    for tag in &article.tags {
+        yaml.push_str("  - ");
+        yaml.push_str(&json_string(tag));
+        yaml.push('\n');
+    }
+    format!("---\n{}---\n\n{}", yaml, body.trim_start())
+}
+
+fn rewrite_markdown_sources(markdown: &str, references: &[MarkdownImageReferenceDto], rewrites: &HashMap<String, String>) -> String {
+    let mut output = markdown.to_string();
+    for reference in references {
+        if let Some(next) = rewrites.get(&reference.id) {
+            if reference.kind == "obsidian" {
+                output = output.replacen(&reference.raw, &format!("![{}]({})", reference.alt.clone().unwrap_or_default(), next), 1);
+            } else {
+                output = output.replacen(&reference.source, next, 1);
+            }
+        }
+    }
+    output
+}
+
+fn resolve_obsidian(reference: &MarkdownImageReferenceDto, markdown_dir: &Path, obsidian: Option<&ObsidianOptions>) -> Result<ResolvedImageDependencyDto, DesktopCommandError> {
+    let file_name = Path::new(&reference.source).file_name().and_then(OsStr::to_str).unwrap_or(&reference.source);
+    let mut candidates = vec![markdown_dir.join(file_name), markdown_dir.join("attachments").join(file_name), markdown_dir.join("assets").join(file_name), markdown_dir.join("images").join(file_name)];
+    if let Some(options) = obsidian {
+        for directory in options.attachment_directories.as_deref().unwrap_or(&[]) {
+            candidates.push(PathBuf::from(directory).join(file_name));
+        }
+        if options.enabled.unwrap_or(false) {
+            if let Some(root) = &options.vault_root {
+                for entry in WalkDir::new(root).max_depth(8).into_iter().filter_map(Result::ok) {
+                    if entry.file_type().is_file() && entry.file_name() == file_name {
+                        candidates.push(entry.path().to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    let existing: Vec<_> = candidates.into_iter().filter(|path| path.is_file()).collect();
+    if existing.len() > 1 {
+        return Ok(ResolvedImageDependencyDto {
+            reference_id: reference.id.clone(),
+            original_source: reference.source.clone(),
+            status: "ambiguous".to_string(),
+            resolved_path: None,
+            file_name: Some(file_name.to_string()),
+            mime_type: None,
+            size: None,
+            sha256: None,
+            message: Some("找到多个同名图片候选，需要手动选择。".to_string()),
+            candidates: Some(existing.iter().filter_map(|path| candidate_dto(path).ok()).collect()),
+        });
+    }
+    let fallback = markdown_dir.join(file_name);
+    let selected = existing.first().unwrap_or(&fallback);
+    Ok(resolve_candidate(reference, selected))
+}
+
+fn resolve_candidate(reference: &MarkdownImageReferenceDto, candidate: &Path) -> ResolvedImageDependencyDto {
+    let metadata = match fs::metadata(candidate) {
+        Ok(value) => value,
+        Err(_) => {
+            return ResolvedImageDependencyDto {
+                reference_id: reference.id.clone(),
+                original_source: reference.source.clone(),
+                status: "missing".to_string(),
+                resolved_path: Some(display_path(candidate)),
+                file_name: candidate.file_name().and_then(OsStr::to_str).map(str::to_string),
+                mime_type: None,
+                size: None,
+                sha256: None,
+                message: Some("找不到 Markdown 引用的本地图片。".to_string()),
+                candidates: None,
+            };
+        }
+    };
+    if !metadata.is_file() {
+        return blocked_dependency(reference, "unsupported", "图片引用指向的不是普通文件。");
+    }
+    let bytes = match fs::read(candidate) {
+        Ok(value) => value,
+        Err(_) => return blocked_dependency(reference, "unsupported", "图片文件不可读取。"),
+    };
+    let mime = match detect_image_mime(&bytes) {
+        Some(value) => value,
+        None => return blocked_dependency(reference, "unsupported", "文件内容不是受支持的图片格式。"),
+    };
+    ResolvedImageDependencyDto {
+        reference_id: reference.id.clone(),
+        original_source: reference.source.clone(),
+        status: "resolved".to_string(),
+        resolved_path: Some(display_path(candidate)),
+        file_name: candidate.file_name().and_then(OsStr::to_str).map(str::to_string),
+        mime_type: Some(mime.to_string()),
+        size: Some(metadata.len()),
+        sha256: Some(sha256_hex(&bytes)),
+        message: None,
+        candidates: None,
+    }
+}
+
+fn candidate_dto(path: &Path) -> Result<ImageCandidateDto, DesktopCommandError> {
+    let metadata = fs::metadata(path).map_err(|_| DesktopCommandError::FileNotFound)?;
+    let bytes = fs::read(path).map_err(|_| DesktopCommandError::FileNotReadable)?;
+    Ok(ImageCandidateDto {
+        absolute_path: display_path(path),
+        file_name: path.file_name().and_then(OsStr::to_str).unwrap_or("image").to_string(),
+        size: metadata.len(),
+        mime_type: detect_image_mime(&bytes).map(str::to_string),
+        sha256: Some(sha256_hex(&bytes)),
+    })
+}
+
+fn normalize_source(base: &Path, source: &str) -> Result<PathBuf, DesktopCommandError> {
+    let decoded = source.replace('\\', "/");
+    if decoded.starts_with("//") {
+        return Err(DesktopCommandError::UnsafePath);
+    }
+    let path = PathBuf::from(decoded);
+    Ok(if path.is_absolute() { path } else { base.join(path) })
+}
+
+fn unsafe_source(source: &str) -> bool {
+    let path = Path::new(source);
+    path.components().any(|component| matches!(component, Component::ParentDir))
+}
+
+fn ensure_child(parent: &Path, child: &Path) -> Result<(), DesktopCommandError> {
+    let parent = parent.components().collect::<PathBuf>();
+    let child = child.components().collect::<PathBuf>();
+    if child.starts_with(&parent) {
+        Ok(())
+    } else {
+        Err(DesktopCommandError::UnsafePath)
+    }
+}
+
+fn safe_profile_markdown_path(directory: &str, slug: &str) -> Result<PathBuf, DesktopCommandError> {
+    if !is_safe_slug(slug) || directory.starts_with('/') || directory.contains('\\') || directory.contains("..") {
+        return Err(DesktopCommandError::UnsafePath);
+    }
+    let path = PathBuf::from(directory).join(format!("{slug}.md"));
+    if !path.starts_with("content") {
+        return Err(DesktopCommandError::UnsafePath);
+    }
+    Ok(path)
+}
+
+fn is_safe_slug(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+fn safe_file_stem(file_name: &str) -> String {
+    let stem = Path::new(file_name).file_stem().and_then(OsStr::to_str).unwrap_or("image");
+    let mut output = String::new();
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' || ch == ' ' {
+            output.push('-');
+        }
+    }
+    let trimmed = output.trim_matches('-');
+    if trimmed.is_empty() {
+        "image".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn target_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" | "image/jpeg" => "webp",
+        "image/svg+xml" => "svg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        _ => "bin",
+    }
+}
+
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if bytes.get(4..12) == Some(b"ftypavif") || bytes.get(4..12) == Some(b"ftypavis") {
+        Some("image/avif")
+    } else if std::str::from_utf8(bytes).ok().is_some_and(|text| text.trim_start().starts_with("<svg")) {
+        Some("image/svg+xml")
+    } else {
+        None
+    }
+}
+
+fn remote_dependency(reference: &MarkdownImageReferenceDto) -> ResolvedImageDependencyDto {
+    ResolvedImageDependencyDto {
+        reference_id: reference.id.clone(),
+        original_source: reference.source.clone(),
+        status: "remote".to_string(),
+        resolved_path: None,
+        file_name: None,
+        mime_type: None,
+        size: None,
+        sha256: None,
+        message: Some("远程图片会保留原始 URL，本轮不会自动下载。".to_string()),
+        candidates: None,
+    }
+}
+
+fn blocked_dependency(reference: &MarkdownImageReferenceDto, status: &str, message: &str) -> ResolvedImageDependencyDto {
+    ResolvedImageDependencyDto {
+        reference_id: reference.id.clone(),
+        original_source: reference.source.clone(),
+        status: status.to_string(),
+        resolved_path: None,
+        file_name: Path::new(&reference.source).file_name().and_then(OsStr::to_str).map(str::to_string),
+        mime_type: None,
+        size: None,
+        sha256: None,
+        message: Some(message.to_string()),
+        candidates: None,
+    }
+}
+
+fn strip_front_matter(markdown: &str) -> &str {
+    if let Some(rest) = markdown.strip_prefix("---\n") {
+        if let Some(index) = rest.find("\n---") {
+            return rest[(index + 4)..].trim_start_matches(['\r', '\n']);
+        }
+    }
+    markdown
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn png_bytes() -> Vec<u8> {
+        vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 15, 4, 0, 9, 251, 3, 253, 167, 159, 129, 80, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]
+    }
+
+    fn reference(source: &str, kind: &str) -> MarkdownImageReferenceDto {
+        MarkdownImageReferenceDto {
+            id: "image-001".to_string(),
+            raw: source.to_string(),
+            source: source.to_string(),
+            alt: Some("图".to_string()),
+            title: None,
+            kind: kind.to_string(),
+            path_kind: "relative".to_string(),
+            line: Some(1),
+            column: Some(1),
+        }
+    }
+
+    #[test]
+    fn reads_markdown_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "# Title").unwrap();
+        let result = read_markdown_file(&file, MAX_MARKDOWN_SIZE).unwrap();
+        assert_eq!(result.file_name, "note.md");
+        assert_eq!(result.content, "# Title");
+    }
+
+    #[test]
+    fn rejects_bad_extension() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        fs::write(&file, "# Title").unwrap();
+        assert!(matches!(read_markdown_file(&file, MAX_MARKDOWN_SIZE), Err(DesktopCommandError::UnsupportedFileExtension)));
+    }
+
+    #[test]
+    fn rejects_too_large_markdown() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "abc").unwrap();
+        assert!(matches!(read_markdown_file(&file, 1), Err(DesktopCommandError::FileTooLarge)));
+    }
+
+    #[test]
+    fn resolves_relative_image() {
+        let dir = tempdir().unwrap();
+        let image = dir.path().join("a.png");
+        fs::write(&image, png_bytes()).unwrap();
+        let request = ResolveImageDependenciesRequest {
+            markdown_file: SelectedMarkdownFileDto {
+                absolute_path: display_path(&dir.path().join("note.md")),
+                file_name: "note.md".to_string(),
+                directory_path: display_path(dir.path()),
+                size: 1,
+                modified_at: None,
+                content: String::new(),
+                source_fingerprint: String::new(),
+            },
+            references: vec![reference("a.png", "markdown")],
+            obsidian: None,
+        };
+        let result = resolve_dependencies(request).unwrap();
+        assert_eq!(result[0].status, "resolved");
+        assert_eq!(result[0].mime_type.as_deref(), Some("image/png"));
+    }
+
+    #[test]
+    fn rejects_traversal_image() {
+        assert!(unsafe_source("../secret.png"));
+    }
+
+    #[test]
+    fn detects_missing_image() {
+        let dir = tempdir().unwrap();
+        let result = resolve_candidate(&reference("missing.png", "markdown"), &dir.path().join("missing.png"));
+        assert_eq!(result.status, "missing");
+    }
+
+    #[test]
+    fn detects_bad_mime() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("fake.png");
+        fs::write(&file, "not image").unwrap();
+        let result = resolve_candidate(&reference("fake.png", "markdown"), &file);
+        assert_eq!(result.status, "unsupported");
+    }
+
+    #[test]
+    fn sha_is_stable() {
+        assert_eq!(sha256_hex(b"abc"), sha256_hex(b"abc"));
+    }
+
+    #[test]
+    fn target_path_escape_rejected() {
+        assert!(safe_profile_markdown_path("../private", "note").is_err());
+        assert!(safe_profile_markdown_path("content/ok", "../note").is_err());
+    }
+
+    #[test]
+    fn creates_and_discards_workspace() {
+        let dir = tempdir().unwrap();
+        let md = dir.path().join("note.md");
+        fs::write(&md, "# Title").unwrap();
+        let request = GeneratePublishWorkspaceRequest {
+            repository_root: display_path(dir.path()),
+            source_markdown_path: display_path(&md),
+            source_fingerprint: sha256_hex(b"# Title"),
+            markdown_content: "# Title".to_string(),
+            article: ArticleInfoDto {
+                title: "Title".to_string(),
+                description: "".to_string(),
+                slug: "title".to_string(),
+                tags: vec![],
+                date: "2026-07-30".to_string(),
+                updated: "2026-07-30".to_string(),
+                draft: false,
+                featured: false,
+            },
+            archive_profile: ArchiveProfileDto {
+                id: "uncategorized".to_string(),
+                name: "Other".to_string(),
+                category: "Other".to_string(),
+                topic: Some("Uncategorized".to_string()),
+                directory: "content/other/uncategorized".to_string(),
+                default_tags: vec![],
+                description: None,
+            },
+            image_references: vec![],
+            dependencies: vec![],
+            pending_archive_profiles: vec![],
+        };
+        let result = generate_workspace(request).unwrap();
+        assert!(Path::new(&result.workspace_path).exists());
+        fs::remove_dir_all(result.workspace_path).unwrap();
+    }
+}

@@ -29,7 +29,7 @@ describe("PublishFlow", () => {
 
   it("图片缺失阻止最终发布提示", async () => {
     await selectMarkdown();
-    expect(screen.getByText(/最终发布前必须处理/)).toBeInTheDocument();
+    expect(screen.getByText(/生成正式工作区前必须处理/)).toBeInTheDocument();
   });
 
   it("修改标题不影响归档选择", async () => {
@@ -54,11 +54,11 @@ describe("PublishFlow", () => {
     await selectMarkdown();
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
-    fireEvent.click(screen.getByText("＋ 新建归档方案"));
+    fireEvent.click(screen.getByText("+ 新建归档方案"));
     fireEvent.change(screen.getByLabelText("专题"), { target: { value: "Durable Execution" } });
     fireEvent.click(screen.getByText("创建并选中"));
     expect(screen.getByTestId("markdown-path")).toHaveTextContent("content/ai-agent/durable-execution/langgraph-checkpoint.md");
-    expect(screen.getByText(/不会写入 archive-profiles.yml/)).toBeInTheDocument();
+    expect(screen.getByText(/不会直接写入 archive-profiles.yml/)).toBeInTheDocument();
   });
 
   it("最终路径预览正确且不显示发布成功", async () => {
@@ -66,7 +66,7 @@ describe("PublishFlow", () => {
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
-    expect(screen.getByText("生成发布草稿")).toBeInTheDocument();
+    expect(screen.getByText("生成发布工作区")).toBeInTheDocument();
     expect(screen.queryByText("发布成功")).not.toBeInTheDocument();
     expect(screen.getByText("content/ai-agent/langgraph/langgraph-checkpoint.md")).toBeInTheDocument();
   });

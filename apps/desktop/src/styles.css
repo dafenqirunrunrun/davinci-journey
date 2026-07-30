@@ -502,3 +502,33 @@ pre {
     transition: none !important;
   }
 }
+.workspace-card {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 16px;
+  padding: 18px;
+  background: #f5f5f7;
+}
+
+.validation-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.check-pass,
+.check-fail {
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 0.88rem;
+}
+
+.check-pass {
+  background: rgba(52, 199, 89, 0.12);
+  color: #1f7a3a;
+}
+
+.check-fail {
+  background: rgba(255, 59, 48, 0.12);
+  color: #b3261e;
+}

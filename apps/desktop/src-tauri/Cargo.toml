@@ -1,0 +1,30 @@
+[package]
+name = "davinci-journey-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "davinci_journey_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "davinci-journey-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.2.0", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2.5.0", features = [] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

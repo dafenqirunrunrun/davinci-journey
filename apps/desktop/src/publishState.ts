@@ -1,5 +1,6 @@
 import type { ArchiveProfileChange } from "@davinci-journey/classification";
 import type { ParsedMarkdownDocument } from "@davinci-journey/markdown-core";
+import type { GeneratePublishWorkspaceResult } from "./desktopBridge";
 
 export interface SelectedMarkdownFile {
   absolutePath: string;
@@ -12,6 +13,14 @@ export interface SelectedMarkdownFile {
 
 export type ImageDependencyStatus = "resolved" | "missing" | "remote" | "embedded" | "ambiguous" | "unsupported" | "unsafe";
 
+export interface ImageCandidate {
+  absolutePath: string;
+  fileName: string;
+  size: number;
+  mimeType?: string;
+  sha256?: string;
+}
+
 export interface ResolvedImageDependency {
   referenceId: string;
   originalSource: string;
@@ -22,7 +31,7 @@ export interface ResolvedImageDependency {
   size?: number;
   sha256?: string;
   message?: string;
-  candidates?: string[];
+  candidates?: ImageCandidate[];
 }
 
 export type AssetResolutionChoice = "replace" | "remove" | "keep_pending";
@@ -66,8 +75,9 @@ export interface PublishDraft {
     markdownPath?: string;
     assetDirectory?: string;
     workspacePlan?: PublishWorkspacePlan;
+    workspaceResult?: GeneratePublishWorkspaceResult;
   };
-  status: "selecting" | "parsing" | "needs_attention" | "ready" | "publishing" | "published" | "failed";
+  status: "selecting" | "parsing" | "needs_attention" | "ready" | "generating_workspace" | "workspace_ready" | "failed";
   error?: string;
 }
 
