@@ -5,8 +5,11 @@ packages/*/dist/
 .vite/
 coverage/
 desktop-dev-server*.log
+tauri-dev-smoke-*.log
+tauri-*.png
 .tmp/
 .cache/
 publish-workspaces/
 /.publish-workspaces/
 apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

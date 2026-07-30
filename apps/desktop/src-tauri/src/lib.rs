@@ -286,8 +286,14 @@ struct WorkspaceManifest<'a> {
     assets: &'a [WorkspaceAssetResult],
 }
 
+type AssetWriteResult = (
+    Vec<WorkspaceAssetResult>,
+    HashMap<String, String>,
+    Vec<PublishWarning>,
+);
+
 #[tauri::command]
-pub fn select_markdown_file(
+fn select_markdown_file(
     request: Option<SelectMarkdownFileRequest>,
 ) -> CommandResult<SelectedMarkdownFileDto> {
     let path = rfd::FileDialog::new()
@@ -304,21 +310,21 @@ pub fn select_markdown_file(
 }
 
 #[tauri::command]
-pub fn resolve_image_dependencies(
+fn resolve_image_dependencies(
     request: ResolveImageDependenciesRequest,
 ) -> CommandResult<Vec<ResolvedImageDependencyDto>> {
     resolve_dependencies(request).map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn generate_publish_workspace(
+fn generate_publish_workspace(
     request: GeneratePublishWorkspaceRequest,
 ) -> CommandResult<GeneratePublishWorkspaceResult> {
     generate_workspace(request).map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
+fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
     let root = repository_root();
     if !is_safe_workspace_id(&workspace_id) {
         return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
@@ -337,7 +343,7 @@ pub fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
 }
 
 #[tauri::command]
-pub fn reveal_publish_workspace(path: String) -> CommandResult<()> {
+fn reveal_publish_workspace(path: String) -> CommandResult<()> {
     let root = repository_root().join(".publish-workspaces");
     let target = PathBuf::from(&path);
     ensure_child(&root, &target).map_err(CommandErrorDto::from)?;
@@ -346,8 +352,9 @@ pub fn reveal_publish_workspace(path: String) -> CommandResult<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        let explorer_path = target.to_string_lossy().replace('/', "\\");
         std::process::Command::new("explorer")
-            .arg(path)
+            .arg(explorer_path)
             .spawn()
             .map_err(|_| CommandErrorDto::from(DesktopCommandError::FileNotReadable))?;
     }
@@ -575,14 +582,7 @@ fn write_assets(
     dependencies: &[ResolvedImageDependencyDto],
     target_asset_dir: &Path,
     slug: &str,
-) -> Result<
-    (
-        Vec<WorkspaceAssetResult>,
-        HashMap<String, String>,
-        Vec<PublishWarning>,
-    ),
-    DesktopCommandError,
-> {
+) -> Result<AssetWriteResult, DesktopCommandError> {
     let mut assets = Vec::new();
     let mut rewrites = HashMap::new();
     let mut seen_hashes: HashMap<String, String> = HashMap::new();
@@ -645,7 +645,7 @@ fn write_assets(
             continue;
         }
         let mime = detect_image_mime(&bytes).ok_or(DesktopCommandError::UnsupportedImageType)?;
-        let ext = target_extension(&mime);
+        let ext = target_extension(mime);
         let stem = safe_file_stem(dependency.file_name.as_deref().unwrap_or("image"));
         let mut file_name = format!("{sequence:02}-{stem}.{ext}");
         if used_names.contains(&file_name) {
@@ -655,7 +655,7 @@ fn write_assets(
         let target = target_asset_dir.join(&file_name);
         write_image(
             &bytes,
-            &mime,
+            mime,
             &target,
             &mut warnings,
             &dependency.reference_id,
