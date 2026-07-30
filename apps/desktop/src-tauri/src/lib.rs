@@ -10,6 +10,16 @@ use std::{
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+pub mod security;
+pub mod services;
+
+use services::repository_publish::{
+    apply_publish_workspace, commit_transaction, pre_publish_check, rollback_publish,
+    stage_transaction, ApplyWorkspaceRequest, ApplyWorkspaceResult, CommitTransactionRequest,
+    CommitTransactionResult, GetPublishDiffRequest, PrePublishCheckRequest, PrePublishCheckResult,
+    PublishDiffResult, RollbackPublishRequest, StageTransactionRequest, StageTransactionResult,
+};
+
 const MAX_MARKDOWN_SIZE: u64 = 10 * 1024 * 1024;
 const WORKSPACE_VERSION: u8 = 1;
 
@@ -31,6 +41,29 @@ pub enum DesktopCommandError {
     WorkspaceCreateFailed,
     WorkspaceWriteFailed,
     WorkspaceValidationFailed,
+
+    // Repository publish errors
+    GitRepositoryNotFound,
+    GitOperationInProgress,
+    GitDetachedHead,
+    GitIndexNotClean,
+    GitUnrelatedStagedFiles,
+    GitTargetHasUncommittedChanges,
+    GitHeadChanged,
+    GitStageFailed,
+    GitCommitFailed,
+    PublishWorkspaceNotFound,
+    PublishWorkspaceStale,
+    PublishSourceChanged,
+    PublishTargetConflict,
+    PublishLockExists,
+    PublishTransactionFailed,
+    PublishRollbackFailed,
+    ArchiveConfigChanged,
+    ArchiveProfileConflict,
+    ArchiveProfileWriteFailed,
+    RepositoryPathUnsafe,
+    TargetPathOutsideAllowedRoot,
 }
 
 impl DesktopCommandError {
@@ -52,6 +85,27 @@ impl DesktopCommandError {
             Self::WorkspaceCreateFailed => "WORKSPACE_CREATE_FAILED",
             Self::WorkspaceWriteFailed => "WORKSPACE_WRITE_FAILED",
             Self::WorkspaceValidationFailed => "WORKSPACE_VALIDATION_FAILED",
+            Self::GitRepositoryNotFound => "GIT_REPOSITORY_NOT_FOUND",
+            Self::GitOperationInProgress => "GIT_OPERATION_IN_PROGRESS",
+            Self::GitDetachedHead => "GIT_DETACHED_HEAD",
+            Self::GitIndexNotClean => "GIT_INDEX_NOT_CLEAN",
+            Self::GitUnrelatedStagedFiles => "GIT_UNRELATED_STAGED_FILES",
+            Self::GitTargetHasUncommittedChanges => "GIT_TARGET_HAS_UNCOMMITTED_CHANGES",
+            Self::GitHeadChanged => "GIT_HEAD_CHANGED",
+            Self::GitStageFailed => "GIT_STAGE_FAILED",
+            Self::GitCommitFailed => "GIT_COMMIT_FAILED",
+            Self::PublishWorkspaceNotFound => "PUBLISH_WORKSPACE_NOT_FOUND",
+            Self::PublishWorkspaceStale => "PUBLISH_WORKSPACE_STALE",
+            Self::PublishSourceChanged => "PUBLISH_SOURCE_CHANGED",
+            Self::PublishTargetConflict => "PUBLISH_TARGET_CONFLICT",
+            Self::PublishLockExists => "PUBLISH_LOCK_EXISTS",
+            Self::PublishTransactionFailed => "PUBLISH_TRANSACTION_FAILED",
+            Self::PublishRollbackFailed => "PUBLISH_ROLLBACK_FAILED",
+            Self::ArchiveConfigChanged => "ARCHIVE_CONFIG_CHANGED",
+            Self::ArchiveProfileConflict => "ARCHIVE_PROFILE_CONFLICT",
+            Self::ArchiveProfileWriteFailed => "ARCHIVE_PROFILE_WRITE_FAILED",
+            Self::RepositoryPathUnsafe => "REPOSITORY_PATH_UNSAFE",
+            Self::TargetPathOutsideAllowedRoot => "TARGET_PATH_OUTSIDE_ALLOWED_ROOT",
         }
     }
 
@@ -73,13 +127,42 @@ impl DesktopCommandError {
             Self::WorkspaceCreateFailed => "创建临时发布工作区失败。",
             Self::WorkspaceWriteFailed => "写入临时发布工作区失败。",
             Self::WorkspaceValidationFailed => "临时发布工作区校验失败。",
+            Self::GitRepositoryNotFound => "当前目录不在 Git 仓库中，请在 Git 仓库中运行。",
+            Self::GitOperationInProgress => {
+                "Git 操作正在进行中（Merge/Rebase/Cherry-pick/Bisect），请先完成或取消。"
+            }
+            Self::GitDetachedHead => "当前处于分离 HEAD 状态，请在正常分支上发布。",
+            Self::GitIndexNotClean => "工作区存在未提交的变更，请先处理。",
+            Self::GitUnrelatedStagedFiles => "暂存区包含非本次事务的文件，请先处理已有暂存内容。",
+            Self::GitTargetHasUncommittedChanges => {
+                "目标文章存在尚未提交的修改，请先提交或暂存处理。"
+            }
+            Self::GitHeadChanged => "HEAD 已发生变化，请重新检查仓库状态。",
+            Self::GitStageFailed => "Git stage 暂存失败。",
+            Self::GitCommitFailed => "Git commit 提交失败。",
+            Self::PublishWorkspaceNotFound => "找不到指定的发布工作区。",
+            Self::PublishWorkspaceStale => "发布工作区已过期，请重新生成。",
+            Self::PublishSourceChanged => "源文件在工作区生成后发生了变化，请重新生成发布工作区。",
+            Self::PublishTargetConflict => "目标文件冲突，无法自动覆盖。",
+            Self::PublishLockExists => "另一个发布流程正在进行中，请等待完成。",
+            Self::PublishTransactionFailed => "发布事务执行失败。",
+            Self::PublishRollbackFailed => "发布回滚失败，可能需要手动处理。",
+            Self::ArchiveConfigChanged => "归档配置在工作区生成后已发生变化，请重新生成。",
+            Self::ArchiveProfileConflict => "归档方案冲突，请检查配置。",
+            Self::ArchiveProfileWriteFailed => "写入归档配置失败。",
+            Self::RepositoryPathUnsafe => "仓库路径不安全。",
+            Self::TargetPathOutsideAllowedRoot => "目标路径不在允许的写入根目录内。",
         }
     }
 
     fn recoverable(&self) -> bool {
         !matches!(
             self,
-            Self::InvalidTextEncoding | Self::UnsafePath | Self::UnsafeSvg
+            Self::InvalidTextEncoding
+                | Self::UnsafePath
+                | Self::UnsafeSvg
+                | Self::RepositoryPathUnsafe
+                | Self::TargetPathOutsideAllowedRoot
         )
     }
 }
@@ -361,6 +444,82 @@ fn reveal_publish_workspace(path: String) -> CommandResult<()> {
     Ok(())
 }
 
+// ─── New Repository Publish Commands ─────────────────────────────────────────
+
+#[tauri::command]
+fn inspect_repository_publish(
+    request: PrePublishCheckRequest,
+) -> CommandResult<PrePublishCheckResult> {
+    pre_publish_check(request).map_err(|e| CommandErrorDto {
+        code: "PUBLISH_PRE_CHECK_FAILED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn apply_publish_workspace_command(
+    request: ApplyWorkspaceRequest,
+) -> CommandResult<ApplyWorkspaceResult> {
+    apply_publish_workspace(request).map_err(|e| CommandErrorDto {
+        code: "APPLY_WORKSPACE_FAILED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn get_publish_diff_command(request: GetPublishDiffRequest) -> CommandResult<PublishDiffResult> {
+    services::repository_publish::get_publish_diff(request).map_err(|e| CommandErrorDto {
+        code: "GET_PUBLISH_DIFF_FAILED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn stage_publish_transaction(
+    request: StageTransactionRequest,
+) -> CommandResult<StageTransactionResult> {
+    stage_transaction(request).map_err(|e| CommandErrorDto {
+        code: "STAGE_PUBLISH_FAILED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn commit_publish_transaction(
+    request: CommitTransactionRequest,
+) -> CommandResult<CommitTransactionResult> {
+    commit_transaction(request).map_err(|e| CommandErrorDto {
+        code: "COMMIT_PUBLISH_FAILED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn rollback_repository_publish(request: RollbackPublishRequest) -> CommandResult<()> {
+    rollback_publish(request).map_err(|e| CommandErrorDto {
+        code: "ROLLBACK_PUBLISH_FAILED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: false,
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -368,7 +527,13 @@ pub fn run() {
             resolve_image_dependencies,
             generate_publish_workspace,
             discard_publish_workspace,
-            reveal_publish_workspace
+            reveal_publish_workspace,
+            inspect_repository_publish,
+            apply_publish_workspace_command,
+            get_publish_diff_command,
+            stage_publish_transaction,
+            commit_publish_transaction,
+            rollback_repository_publish,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run desktop app");

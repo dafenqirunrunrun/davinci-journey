@@ -7,14 +7,15 @@ import {
   slugify,
   writeArchiveFrontMatter,
   type ArchiveProfile,
+  type ArchiveProfileChange,
   type NewArchiveProfileInput
 } from "@davinci-journey/classification";
 import { parseMarkdown } from "@davinci-journey/markdown-core";
 import { initialArchiveProfiles } from "../archiveProfiles";
-import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type SelectedMarkdownFileDto } from "../desktopBridge";
+import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type SelectedMarkdownFileDto } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
 
-const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览并发布"];
+const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览并发布", "写入仓库"];
 const today = "2026-07-30";
 
 const emptyForm: NewArchiveProfileInput = {
@@ -78,6 +79,7 @@ async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto, profil
       markdownPath: preview.markdownPath,
       assetDirectory: preview.imageDirectory
     },
+    repository: {},
     status: canContinueFromAssets(dependencies) ? "ready" : "needs_attention"
   };
 }
@@ -115,6 +117,7 @@ export function PublishFlow() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<NewArchiveProfileInput>(emptyForm);
   const [search, setSearch] = useState("");
+  const [commitMessage, setCommitMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingFilePicker = useRef<((file?: File) => void) | undefined>();
 
@@ -240,6 +243,149 @@ export function PublishFlow() {
     setDraft((current) => updatePreview({ ...current, status: canContinueFromAssets(current.assets.dependencies) ? "ready" : "needs_attention", preview: { ...current.preview, workspaceResult: undefined } }, profiles));
   }
 
+  // ─── Repository Publish Operations ─────────────────────────────────────────
+
+  async function inspectRepo() {
+    const workspaceId = draft.preview.workspaceResult?.workspaceId;
+    if (!workspaceId) return;
+    setDraft((current) => ({ ...current, status: "checking_repo", error: undefined }));
+    try {
+      const preCheck = await bridge.inspectRepositoryPublish({
+        repositoryRoot: "",
+        workspaceId
+      });
+      setDraft((current) => ({
+        ...current,
+        status: "confirm_write",
+        repository: { ...current.repository, preCheckResult: preCheck }
+      }));
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: "workspace_ready", error: desktopErrorMessage(error) }));
+    }
+  }
+
+  async function applyWorkspace() {
+    if (!draft.preview.workspaceResult) return;
+    setDraft((current) => ({ ...current, status: "writing", error: undefined }));
+    try {
+      const result = await bridge.applyPublishWorkspace({
+        repositoryRoot: "",
+        workspaceId: draft.preview.workspaceResult.workspaceId,
+        operation: draft.repository.preCheckResult?.targetConflicts.targetExists ? "update" : "create",
+        archiveProfileChanges: draft.archive.pendingProfileChanges
+          .filter((c) => c.type === "create")
+          .map((c) => ({
+            id: c.profile.id,
+            name: c.profile.name,
+            category: c.profile.category,
+            topic: c.profile.topic,
+            directory: c.profile.directory,
+            defaultTags: c.profile.defaultTags,
+            description: c.profile.description
+          }))
+      });
+      setDraft((current) => ({
+        ...current,
+        status: "written",
+        repository: { ...current.repository, applyResult: result, transactionId: result.transactionId }
+      }));
+      // Generate default commit message
+      const slug = draft.article.slug;
+      const topic = selectedProfile?.topic?.toLowerCase() ?? "note";
+      setCommitMessage(`docs(${topic}): add ${slug} with assets`);
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: "failed", error: desktopErrorMessage(error) }));
+    }
+  }
+
+  async function viewDiff() {
+    const txId = draft.repository.transactionId;
+    if (!txId) return;
+    setDraft((current) => ({ ...current, status: "viewing_diff", error: undefined }));
+    try {
+      const paths = draft.repository.applyResult?.plannedChanges.map((c) => c.path) ?? [];
+      const diffResult = await bridge.getPublishDiff({
+        repositoryRoot: "",
+        paths
+      });
+      setDraft((current) => ({
+        ...current,
+        status: "viewing_diff",
+        repository: { ...current.repository, diffResult: JSON.stringify(diffResult) }
+      }));
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: "written", error: desktopErrorMessage(error) }));
+    }
+  }
+
+  async function stageTransaction() {
+    const txId = draft.repository.transactionId;
+    if (!txId) return;
+    setDraft((current) => ({ ...current, status: "staging", error: undefined }));
+    try {
+      const stageResult = await bridge.stagePublishTransaction({
+        repositoryRoot: "",
+        transactionId: txId
+      });
+      if (!stageResult.canCommit) {
+        setDraft((current) => ({
+          ...current,
+          status: "written",
+          repository: { ...current.repository, stageResult },
+          error: stageResult.message ?? "暂存失败"
+        }));
+        return;
+      }
+      setDraft((current) => ({
+        ...current,
+        status: "confirm_commit",
+        repository: { ...current.repository, stageResult }
+      }));
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: "written", error: desktopErrorMessage(error) }));
+    }
+  }
+
+  async function doCommit() {
+    const txId = draft.repository.transactionId;
+    if (!txId || !commitMessage.trim()) return;
+    setDraft((current) => ({ ...current, status: "confirm_commit", error: undefined }));
+    try {
+      const commitResult = await bridge.commitPublishTransaction({
+        repositoryRoot: "",
+        transactionId: txId,
+        message: commitMessage.trim()
+      });
+      setDraft((current) => ({
+        ...current,
+        status: "committed",
+        repository: { ...current.repository, commitResult }
+      }));
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: "confirm_commit", error: desktopErrorMessage(error) }));
+    }
+  }
+
+  async function doRollback() {
+    const txId = draft.repository.transactionId;
+    if (!txId) return;
+    setDraft((current) => ({ ...current, status: "rolling_back", error: undefined }));
+    try {
+      await bridge.rollbackRepositoryPublish({
+        repositoryRoot: "",
+        transactionId: txId
+      });
+      setDraft((current) => updatePreview({
+        ...current,
+        status: "workspace_ready",
+        repository: {},
+        preview: { ...current.preview, workspaceResult: undefined }
+      }, profiles));
+    } catch (error) {
+      setDraft((current) => ({ ...current, status: "written", error: desktopErrorMessage(error) }));
+    }
+  }
+
   return (
     <section>
       <nav aria-label="发布步骤" className="stepper">
@@ -354,7 +500,7 @@ export function PublishFlow() {
             <StepHeader title={selectedProfile?.name ?? "未选择"} eyebrow="最终结果预览" />
             <PathBlock title="Markdown" value={draft.preview.markdownPath ?? ""} testId="markdown-path" />
             <PathBlock title="图片资源" value={draft.preview.assetDirectory ?? ""} testId="image-path" />
-            {draft.archive.pendingProfileChanges.length > 0 && <p className="warning-text">新建归档方案只保存在当前发布草稿中，本轮不会直接写入 archive-profiles.yml。</p>}
+            {draft.archive.pendingProfileChanges.length > 0 && <p className="warning-text">新建归档方案只保存在当前发布草稿中，正式发布时一并写入。</p>}
             <StepActions onBack={() => setStep(3)} onNext={() => setStep(5)} />
           </aside>
           {showCreate && (
@@ -395,6 +541,9 @@ export function PublishFlow() {
           </div>
           <PathBlock title="Front Matter" value={frontMatterPreview.split("---")[1]?.trim() ?? ""} pre />
           <PathBlock title="计划文件变更" value={(draft.preview.workspacePlan?.plannedFiles ?? []).map((file) => `${file.type}: ${file.path}`).join("\n") || "暂无可写入文件计划"} pre />
+          {draft.archive.pendingProfileChanges.filter((c): c is Extract<ArchiveProfileChange, { type: "create" }> => c.type === "create").map((c) => (
+            <PathBlock key={c.profile.id} title={`新建：${c.profile.name}`} value={`${c.profile.name} → ${c.profile.directory}`} pre />
+          ))}
           {draft.error && <p className="error-message">{draft.error}</p>}
           {draft.preview.workspaceResult && <WorkspaceResult bridge={bridge} result={draft.preview.workspaceResult} onDiscard={() => void discardWorkspace()} onRegenerate={() => void generateWorkspace()} />}
           <div className="actions">
@@ -404,17 +553,340 @@ export function PublishFlow() {
             <button className="primary-button" type="button" disabled={draft.status === "generating_workspace"} onClick={() => void generateWorkspace()}>
               {draft.status === "generating_workspace" ? "正在生成..." : "生成发布工作区"}
             </button>
-            <button className="secondary-button" type="button" disabled title="正式写入与 Git 提交将在下一阶段启用">
-              下一步：写入仓库
+            <button className="primary-button" type="button" disabled={draft.status !== "workspace_ready"} onClick={() => { setStep(6); void inspectRepo(); }}>
+              写入正式仓库
             </button>
           </div>
+        </div>
+      )}
+
+      {step === 6 && (
+        <div className="panel repository-publish-panel">
+          <StepHeader title="写入正式仓库" eyebrow="第 6 步" />
+
+          {draft.status === "checking_repo" && (
+            <div className="status-message">
+              <p>正在检查仓库状态...</p>
+            </div>
+          )}
+
+          {draft.status === "confirm_write" && draft.repository.preCheckResult && (
+            <PreCheckResult
+              preCheck={draft.repository.preCheckResult}
+              plannedChanges={draft.preview.workspacePlan?.plannedFiles ?? []}
+              pendingProfiles={draft.archive.pendingProfileChanges}
+              onConfirm={() => void applyWorkspace()}
+              onBack={() => setStep(5)}
+              onDiscard={() => { setStep(5); void discardWorkspace(); }}
+            />
+          )}
+
+          {draft.status === "writing" && (
+            <div className="status-message">
+              <p>正在写入正式仓库...</p>
+            </div>
+          )}
+
+          {draft.status === "written" && draft.repository.applyResult && (
+            <WriteResult
+              result={draft.repository.applyResult}
+              onViewDiff={() => void viewDiff()}
+              onRollback={() => void doRollback()}
+              onStage={() => void stageTransaction()}
+              error={draft.error}
+            />
+          )}
+
+          {draft.status === "viewing_diff" && draft.repository.diffResult && (
+            <DiffView
+              diffData={draft.repository.diffResult}
+              onStage={() => void stageTransaction()}
+              onBack={() => setDraft((current) => ({ ...current, status: "written" }))}
+            />
+          )}
+
+          {draft.status === "staging" && (
+            <div className="status-message">
+              <p>正在暂存文件...</p>
+            </div>
+          )}
+
+          {draft.status === "confirm_commit" && (
+            <CommitView
+              message={commitMessage}
+              stagedFiles={draft.repository.stageResult?.stagedFiles ?? []}
+              onMessageChange={setCommitMessage}
+              onCommit={() => void doCommit()}
+              onBack={() => setDraft((current) => ({ ...current, status: "written" }))}
+              error={draft.error}
+            />
+          )}
+
+          {draft.status === "committed" && draft.repository.commitResult && (
+            <CommitResultView
+              result={draft.repository.commitResult}
+            />
+          )}
+
+          {draft.status === "rolling_back" && (
+            <div className="status-message">
+              <p>正在回滚...</p>
+            </div>
+          )}
+
+          {draft.error && draft.status !== "written" && draft.status !== "confirm_commit" && (
+            <p className="error-message">{draft.error}</p>
+          )}
         </div>
       )}
     </section>
   );
 }
 
-function WorkspaceResult({ bridge, result, onDiscard, onRegenerate }: { bridge: DesktopBridge; result: NonNullable<PublishDraft["preview"]["workspaceResult"]>; onDiscard: () => void; onRegenerate: () => void }) {
+// ─── Sub-Components ─────────────────────────────────────────────────────────
+
+function PreCheckResult({ preCheck, plannedChanges, pendingProfiles, onConfirm, onBack, onDiscard }: {
+  preCheck: PrePublishCheckResult;
+  plannedChanges: { type: string; path: string }[];
+  pendingProfiles: ArchiveProfileChange[];
+  onConfirm: () => void;
+  onBack: () => void;
+  onDiscard: () => void;
+}) {
+  const canWrite = preCheck.gitStatus.safeToPublish
+    && preCheck.workspaceStatus.passed
+    && preCheck.sourceFingerprintStatus.sourceUnchanged
+    && preCheck.targetConflicts.canProceed;
+
+  const createProfiles = pendingProfiles.filter((c): c is Extract<ArchiveProfileChange, { type: "create" }> => c.type === "create");
+
+  return (
+    <div className="confirm-write">
+      <h3>正式写入确认</h3>
+
+      <section className="write-section">
+        <h4>Git 状态</h4>
+        <div className="status-grid">
+          <span>分支：{preCheck.gitStatus.branch ?? "（无）"}</span>
+          <span>HEAD：{preCheck.gitStatus.head.slice(0, 7)}</span>
+          <span>安全发布：{preCheck.gitStatus.safeToPublish ? "✅" : "❌"}</span>
+          <span>无关未跟踪文件：{preCheck.gitStatus.unrelatedUntrackedCount}</span>
+        </div>
+        {preCheck.gitStatus.message && <p className="warning-text">{preCheck.gitStatus.message}</p>}
+      </section>
+
+      <section className="write-section">
+        <h4>文章</h4>
+        <p>操作：{preCheck.targetConflicts.targetExists ? "更新" : "创建"}</p>
+        {plannedChanges.filter((f) => f.path.startsWith("content/")).map((f, i) => (
+          <code key={i}>{f.path}</code>
+        ))}
+      </section>
+
+      <section className="write-section">
+        <h4>图片</h4>
+        <p>新增：{plannedChanges.filter((f) => f.path.startsWith("public/")).length}</p>
+      </section>
+
+      <section className="write-section">
+        <h4>归档配置</h4>
+        {createProfiles.length > 0 ? (
+          <div>
+            <p>新增归档方案：{createProfiles.map((c) => c.profile.name).join("、")}</p>
+            <code>config/archive-profiles.yml</code>
+          </div>
+        ) : (
+          <p className="muted-text">无变更</p>
+        )}
+      </section>
+
+      <section className="write-section">
+        <h4>冲突检查</h4>
+        <div className="status-grid">
+          <span>目标文件冲突：{preCheck.targetConflicts.canProceed ? "0" : "1"}</span>
+          <span>未提交目标修改：{preCheck.targetConflicts.uncommittedFiles.length}</span>
+          <span>源文件变化：{preCheck.sourceFingerprintStatus.markdownChanged ? "有变化" : "无"}</span>
+        </div>
+        {preCheck.targetConflicts.message && <p className="warning-text">{preCheck.targetConflicts.message}</p>}
+        {preCheck.sourceFingerprintStatus.message && <p className="error-message">{preCheck.sourceFingerprintStatus.message}</p>}
+      </section>
+
+      <section className="write-section">
+        <h4>工作区验证</h4>
+        {preCheck.workspaceStatus.checks.map((check, i) => (
+          <span className="check-item" key={i}>{check}</span>
+        ))}
+        {preCheck.workspaceStatus.warnings.map((w, i) => (
+          <span className="warning-text" key={i}>{w}</span>
+        ))}
+      </section>
+
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onBack}>返回修改</button>
+        <button className="secondary-button" type="button" onClick={onDiscard}>丢弃工作区</button>
+        <button className="primary-button" type="button" disabled={!canWrite} onClick={onConfirm}>
+          确认写入正式仓库
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WriteResult({ result, onViewDiff, onRollback, onStage, error }: {
+  result: NonNullable<import("../publishState").PublishDraft["repository"]["applyResult"]>;
+  onViewDiff: () => void;
+  onRollback: () => void;
+  onStage: () => void;
+  error?: string;
+}) {
+  const creates = result.plannedChanges.filter((c) => c.operation === "create");
+  const updates = result.plannedChanges.filter((c) => c.operation === "update");
+
+  return (
+    <div className="write-result">
+      <p className="eyebrow">已写入正式仓库</p>
+      <p className="muted-text">尚未提交 Git</p>
+
+      <section className="write-section">
+        <h4>变更</h4>
+        {creates.length > 0 && (
+          <div>
+            <p><strong>新增（{creates.length}）</strong></p>
+            {creates.map((c, i) => <code key={i}>+ {c.path}</code>)}
+          </div>
+        )}
+        {updates.length > 0 && (
+          <div>
+            <p><strong>修改（{updates.length}）</strong></p>
+            {updates.map((c, i) => <code key={i}>~ {c.path}</code>)}
+          </div>
+        )}
+      </section>
+
+      {error && <p className="error-message">{error}</p>}
+
+      <div className="actions">
+        <button className="primary-button" type="button" onClick={onViewDiff}>
+          查看 Git Diff
+        </button>
+        <button className="primary-button" type="button" onClick={onStage}>
+          准备提交
+        </button>
+        <button className="secondary-button" type="button" onClick={onRollback}>
+          回滚本次写入
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DiffView({ diffData, onStage, onBack }: {
+  diffData: string;
+  onStage: () => void;
+  onBack: () => void;
+}) {
+  let parsedDiff: { diffs: { path: string; operation: string; diffText: string; isBinary: boolean }[] } | null = null;
+  try {
+    parsedDiff = JSON.parse(diffData);
+  } catch { /* use raw diff data */ }
+
+  return (
+    <div className="diff-view">
+      <h3>Git Diff</h3>
+
+      {parsedDiff ? (
+        parsedDiff.diffs.map((diff, i) => (
+          <div className="diff-file" key={i}>
+            <h4>{diff.isBinary ? "🖼" : "📄"} {diff.path} ({diff.operation})</h4>
+            {diff.isBinary ? (
+              <p className="muted-text">二进制文件，仅显示元数据</p>
+            ) : (
+              <pre className="diff-text">{diff.diffText || "（无差异内容）"}</pre>
+            )}
+          </div>
+        ))
+      ) : (
+        <pre className="diff-text">{diffData}</pre>
+      )}
+
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onBack}>返回</button>
+        <button className="primary-button" type="button" onClick={onStage}>
+          准备提交
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CommitView({ message, stagedFiles, onMessageChange, onCommit, onBack, error }: {
+  message: string;
+  stagedFiles: string[];
+  onMessageChange: (msg: string) => void;
+  onCommit: () => void;
+  onBack: () => void;
+  error?: string;
+}) {
+  return (
+    <div className="commit-view">
+      <h3>准备提交</h3>
+      <p>准备提交 {stagedFiles.length} 个文件</p>
+
+      <section className="write-section">
+        <h4>Commit Message</h4>
+        <label className="search-label">
+          提交信息
+          <input
+            value={message}
+            onChange={(e) => onMessageChange(e.target.value)}
+            placeholder="docs(scope): description"
+          />
+        </label>
+      </section>
+
+      <section className="write-section">
+        <h4>已暂存</h4>
+        {stagedFiles.map((f, i) => <code key={i}>{f}</code>)}
+      </section>
+
+      {error && <p className="error-message">{error}</p>}
+
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onBack}>返回</button>
+        <button className="primary-button" type="button" disabled={!message.trim()} onClick={onCommit}>
+          确认创建本地 Commit
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CommitResultView({ result }: {
+  result: import("../desktopBridge").CommitTransactionResult;
+}) {
+  return (
+    <div className="commit-result">
+      <p className="eyebrow">本地 Commit 已创建</p>
+      <div className="commit-info">
+        <p>Hash：<code>{result.shortHash}</code></p>
+        <p>分支：{result.branch}</p>
+        <p>Message：{result.message}</p>
+      </div>
+
+      <section className="write-section">
+        <h4>已提交文件</h4>
+        {result.committedFiles.map((f, i) => <code key={i}>{f}</code>)}
+      </section>
+
+      <p className="muted-text">本地提交已完成，尚未推送到 GitHub。</p>
+      <button className="secondary-button" type="button" disabled title="推送到 GitHub（下一阶段）">
+        推送到 GitHub（下一阶段）
+      </button>
+    </div>
+  );
+}
+
+function WorkspaceResult({ bridge, result, onDiscard, onRegenerate }: { bridge: DesktopBridge; result: NonNullable<import("../publishState").PublishDraft["preview"]["workspaceResult"]>; onDiscard: () => void; onRegenerate: () => void }) {
   return (
     <article className="workspace-card">
       <p className="eyebrow">发布工作区已生成</p>

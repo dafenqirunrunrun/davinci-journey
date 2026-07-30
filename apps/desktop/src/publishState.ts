@@ -1,6 +1,6 @@
 import type { ArchiveProfileChange } from "@davinci-journey/classification";
 import type { ParsedMarkdownDocument } from "@davinci-journey/markdown-core";
-import type { GeneratePublishWorkspaceResult } from "./desktopBridge";
+import type { ApplyWorkspaceResult, CommitTransactionResult, GeneratePublishWorkspaceResult, PrePublishCheckResult, StageTransactionResult } from "./desktopBridge";
 
 export interface SelectedMarkdownFile {
   absolutePath: string;
@@ -46,6 +46,17 @@ export interface PublishWorkspacePlan {
 
 export type PlannedFileChange = { type: "create"; path: string; source?: string } | { type: "update"; path: string } | { type: "delete"; path: string };
 
+export type PublishStatus = "selecting" | "parsing" | "needs_attention" | "ready" | "generating_workspace" | "workspace_ready" | "checking_repo" | "confirm_write" | "writing" | "written" | "viewing_diff" | "staging" | "confirm_commit" | "committed" | "rolling_back" | "failed";
+
+export interface RepositoryPublishState {
+  preCheckResult?: PrePublishCheckResult;
+  applyResult?: ApplyWorkspaceResult;
+  stageResult?: StageTransactionResult;
+  commitResult?: CommitTransactionResult;
+  diffResult?: string;
+  transactionId?: string;
+}
+
 export interface PublishDraft {
   id: string;
   source: {
@@ -77,7 +88,8 @@ export interface PublishDraft {
     workspacePlan?: PublishWorkspacePlan;
     workspaceResult?: GeneratePublishWorkspaceResult;
   };
-  status: "selecting" | "parsing" | "needs_attention" | "ready" | "generating_workspace" | "workspace_ready" | "failed";
+  repository: RepositoryPublishState;
+  status: PublishStatus;
   error?: string;
 }
 
@@ -103,6 +115,7 @@ export const emptyDraft: PublishDraft = {
     pendingProfileChanges: []
   },
   preview: {},
+  repository: {},
   status: "selecting"
 };
 
