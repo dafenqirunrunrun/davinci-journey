@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.davinci.journey",
   "build": {
-    "beforeDevCommand": "pnpm --dir apps/desktop exec vite --host 127.0.0.1 --port 4174",
+    "beforeDevCommand": "pnpm exec vite --host 127.0.0.1 --port 4174",
     "devUrl": "http://127.0.0.1:4174",
     "beforeBuildCommand": "pnpm --filter @davinci-journey/desktop build",
     "frontendDist": "../dist"

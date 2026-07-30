@@ -1,4 +1,4 @@
-﻿use chrono::Utc;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -77,7 +77,10 @@ impl DesktopCommandError {
     }
 
     fn recoverable(&self) -> bool {
-        !matches!(self, Self::InvalidTextEncoding | Self::UnsafePath | Self::UnsafeSvg)
+        !matches!(
+            self,
+            Self::InvalidTextEncoding | Self::UnsafePath | Self::UnsafeSvg
+        )
     }
 }
 
@@ -284,21 +287,33 @@ struct WorkspaceManifest<'a> {
 }
 
 #[tauri::command]
-pub fn select_markdown_file(request: Option<SelectMarkdownFileRequest>) -> CommandResult<SelectedMarkdownFileDto> {
+pub fn select_markdown_file(
+    request: Option<SelectMarkdownFileRequest>,
+) -> CommandResult<SelectedMarkdownFileDto> {
     let path = rfd::FileDialog::new()
         .add_filter("Markdown", &["md", "markdown"])
         .pick_file()
         .ok_or(DesktopCommandError::FileSelectionCancelled)?;
-    read_markdown_file(&path, request.and_then(|item| item.max_bytes).unwrap_or(MAX_MARKDOWN_SIZE)).map_err(Into::into)
+    read_markdown_file(
+        &path,
+        request
+            .and_then(|item| item.max_bytes)
+            .unwrap_or(MAX_MARKDOWN_SIZE),
+    )
+    .map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn resolve_image_dependencies(request: ResolveImageDependenciesRequest) -> CommandResult<Vec<ResolvedImageDependencyDto>> {
+pub fn resolve_image_dependencies(
+    request: ResolveImageDependenciesRequest,
+) -> CommandResult<Vec<ResolvedImageDependencyDto>> {
     resolve_dependencies(request).map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn generate_publish_workspace(request: GeneratePublishWorkspaceRequest) -> CommandResult<GeneratePublishWorkspaceResult> {
+pub fn generate_publish_workspace(
+    request: GeneratePublishWorkspaceRequest,
+) -> CommandResult<GeneratePublishWorkspaceResult> {
     generate_workspace(request).map_err(Into::into)
 }
 
@@ -315,7 +330,8 @@ pub fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
         return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
     }
     if workspace.exists() {
-        fs::remove_dir_all(workspace).map_err(|_| CommandErrorDto::from(DesktopCommandError::WorkspaceWriteFailed))?;
+        fs::remove_dir_all(workspace)
+            .map_err(|_| CommandErrorDto::from(DesktopCommandError::WorkspaceWriteFailed))?;
     }
     Ok(())
 }
@@ -360,8 +376,15 @@ fn repository_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-fn read_markdown_file(path: &Path, max_bytes: u64) -> Result<SelectedMarkdownFileDto, DesktopCommandError> {
-    let extension = path.extension().and_then(OsStr::to_str).unwrap_or("").to_ascii_lowercase();
+fn read_markdown_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<SelectedMarkdownFileDto, DesktopCommandError> {
+    let extension = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if extension != "md" && extension != "markdown" {
         return Err(DesktopCommandError::UnsupportedFileExtension);
     }
@@ -373,23 +396,35 @@ fn read_markdown_file(path: &Path, max_bytes: u64) -> Result<SelectedMarkdownFil
         return Err(DesktopCommandError::FileTooLarge);
     }
     let bytes = fs::read(path).map_err(|_| DesktopCommandError::FileNotReadable)?;
-    let content = String::from_utf8(bytes.clone()).map_err(|_| DesktopCommandError::InvalidTextEncoding)?;
+    let content =
+        String::from_utf8(bytes.clone()).map_err(|_| DesktopCommandError::InvalidTextEncoding)?;
     if content.contains('\0') {
         return Err(DesktopCommandError::InvalidTextEncoding);
     }
-    let absolute = path.canonicalize().map_err(|_| DesktopCommandError::FileNotFound)?;
+    let absolute = path
+        .canonicalize()
+        .map_err(|_| DesktopCommandError::FileNotFound)?;
     Ok(SelectedMarkdownFileDto {
         absolute_path: display_path(&absolute),
-        file_name: path.file_name().and_then(OsStr::to_str).unwrap_or("note.md").to_string(),
+        file_name: path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("note.md")
+            .to_string(),
         directory_path: display_path(absolute.parent().unwrap_or_else(|| Path::new(""))),
         size: metadata.len(),
-        modified_at: metadata.modified().ok().map(|time| chrono::DateTime::<Utc>::from(time).to_rfc3339()),
+        modified_at: metadata
+            .modified()
+            .ok()
+            .map(|time| chrono::DateTime::<Utc>::from(time).to_rfc3339()),
         content,
         source_fingerprint: sha256_hex(&bytes),
     })
 }
 
-fn resolve_dependencies(request: ResolveImageDependenciesRequest) -> Result<Vec<ResolvedImageDependencyDto>, DesktopCommandError> {
+fn resolve_dependencies(
+    request: ResolveImageDependenciesRequest,
+) -> Result<Vec<ResolvedImageDependencyDto>, DesktopCommandError> {
     let markdown_dir = PathBuf::from(&request.markdown_file.directory_path);
     let mut results = Vec::new();
     for reference in request.references {
@@ -398,15 +433,27 @@ fn resolve_dependencies(request: ResolveImageDependenciesRequest) -> Result<Vec<
             continue;
         }
         if reference.path_kind == "embedded" {
-            results.push(blocked_dependency(&reference, "embedded", "Base64 鍥剧墖鏈疆鏆備笉鍐欏叆宸ヤ綔鍖猴紝璇峰厛杞崲涓烘湰鍦板浘鐗囥€?));
+            results.push(blocked_dependency(
+                &reference,
+                "embedded",
+                "Base64 图片本轮暂不写入工作区，请先转换为本地图片。",
+            ));
             continue;
         }
         if unsafe_source(&reference.source) {
-            results.push(blocked_dependency(&reference, "unsafe", "鍥剧墖璺緞鍖呭惈涓嶅畨鍏ㄧ墖娈碉紝宸查樆姝㈣В鏋愩€?));
+            results.push(blocked_dependency(
+                &reference,
+                "unsafe",
+                "图片路径包含不安全片段，已阻止解析。",
+            ));
             continue;
         }
         if reference.kind == "obsidian" {
-            results.push(resolve_obsidian(&reference, &markdown_dir, request.obsidian.as_ref())?);
+            results.push(resolve_obsidian(
+                &reference,
+                &markdown_dir,
+                request.obsidian.as_ref(),
+            )?);
         } else {
             let candidate = normalize_source(&markdown_dir, &reference.source)?;
             results.push(resolve_candidate(&reference, &candidate));
@@ -415,7 +462,9 @@ fn resolve_dependencies(request: ResolveImageDependenciesRequest) -> Result<Vec<
     Ok(results)
 }
 
-fn generate_workspace(request: GeneratePublishWorkspaceRequest) -> Result<GeneratePublishWorkspaceResult, DesktopCommandError> {
+fn generate_workspace(
+    request: GeneratePublishWorkspaceRequest,
+) -> Result<GeneratePublishWorkspaceResult, DesktopCommandError> {
     let repo_root = if request.repository_root.trim().is_empty() {
         repository_root()
     } else {
@@ -437,23 +486,55 @@ fn generate_workspace(request: GeneratePublishWorkspaceRequest) -> Result<Genera
         }
     }
 
-    let markdown_rel = safe_profile_markdown_path(&request.archive_profile.directory, &request.article.slug)?;
-    let asset_rel = PathBuf::from("public").join("assets").join("notes").join(&request.article.slug);
+    let markdown_rel =
+        safe_profile_markdown_path(&request.archive_profile.directory, &request.article.slug)?;
+    let asset_rel = PathBuf::from("public")
+        .join("assets")
+        .join("notes")
+        .join(&request.article.slug);
     let target_markdown = workspace.join(&markdown_rel);
     let target_asset_dir = workspace.join(&asset_rel);
     ensure_child(&content_root, &target_markdown)?;
     ensure_child(&public_root, &target_asset_dir)?;
-    fs::create_dir_all(target_markdown.parent().ok_or(DesktopCommandError::WorkspaceCreateFailed)?).map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
-    fs::create_dir_all(&target_asset_dir).map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
+    fs::create_dir_all(
+        target_markdown
+            .parent()
+            .ok_or(DesktopCommandError::WorkspaceCreateFailed)?,
+    )
+    .map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
+    fs::create_dir_all(&target_asset_dir)
+        .map_err(|_| DesktopCommandError::WorkspaceCreateFailed)?;
 
-    let (assets, rewrites, warnings) = write_assets(&request.dependencies, &target_asset_dir, &request.article.slug)?;
-    let rewritten = rewrite_markdown_sources(&request.markdown_content, &request.image_references, &rewrites);
+    let (assets, rewrites, warnings) = write_assets(
+        &request.dependencies,
+        &target_asset_dir,
+        &request.article.slug,
+    )?;
+    let rewritten = rewrite_markdown_sources(
+        &request.markdown_content,
+        &request.image_references,
+        &rewrites,
+    );
     let final_markdown = write_front_matter(&rewritten, &request.article, &request.archive_profile);
-    fs::write(&target_markdown, final_markdown).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+    fs::write(&target_markdown, final_markdown)
+        .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
 
-    let validation = validate_workspace(&workspace, &target_markdown, &target_asset_dir, &request.archive_profile, &request.article, &assets, warnings);
+    let validation = validate_workspace(
+        &workspace,
+        &target_markdown,
+        &target_asset_dir,
+        &request.archive_profile,
+        &request.article,
+        &assets,
+        warnings,
+    );
     let validation_path = reports_root.join("validation.json");
-    fs::write(&validation_path, serde_json::to_string_pretty(&validation).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+    fs::write(
+        &validation_path,
+        serde_json::to_string_pretty(&validation)
+            .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?,
+    )
+    .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
 
     let manifest_path = workspace.join("manifest.json");
     let mut planned_changes = vec![display_path(&markdown_rel), display_path(&asset_rel)];
@@ -472,7 +553,12 @@ fn generate_workspace(request: GeneratePublishWorkspaceRequest) -> Result<Genera
         planned_changes,
         assets: &assets,
     };
-    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?,
+    )
+    .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
 
     Ok(GeneratePublishWorkspaceResult {
         workspace_id,
@@ -489,7 +575,14 @@ fn write_assets(
     dependencies: &[ResolvedImageDependencyDto],
     target_asset_dir: &Path,
     slug: &str,
-) -> Result<(Vec<WorkspaceAssetResult>, HashMap<String, String>, Vec<PublishWarning>), DesktopCommandError> {
+) -> Result<
+    (
+        Vec<WorkspaceAssetResult>,
+        HashMap<String, String>,
+        Vec<PublishWarning>,
+    ),
+    DesktopCommandError,
+> {
     let mut assets = Vec::new();
     let mut rewrites = HashMap::new();
     let mut seen_hashes: HashMap<String, String> = HashMap::new();
@@ -520,18 +613,26 @@ fn write_assets(
                 status: "blocked".to_string(),
                 warning: Some(PublishWarning {
                     code: "IMAGE_NOT_READY".to_string(),
-                    message: "鍥剧墖灏氭湭瑙ｆ瀽瀹屾垚锛屽凡闃绘鍐欏叆宸ヤ綔鍖恒€?.to_string(),
+                    message: "图片尚未解析完成，已阻止写入工作区。".to_string(),
                     reference_id: Some(dependency.reference_id.clone()),
                     path: dependency.resolved_path.clone(),
                 }),
             });
             continue;
         }
-        let source_path = PathBuf::from(dependency.resolved_path.as_deref().ok_or(DesktopCommandError::ImageNotFound)?);
+        let source_path = PathBuf::from(
+            dependency
+                .resolved_path
+                .as_deref()
+                .ok_or(DesktopCommandError::ImageNotFound)?,
+        );
         let bytes = fs::read(&source_path).map_err(|_| DesktopCommandError::ImageNotFound)?;
         let sha = sha256_hex(&bytes);
         if let Some(existing_public_path) = seen_hashes.get(&sha) {
-            rewrites.insert(dependency.reference_id.clone(), existing_public_path.clone());
+            rewrites.insert(
+                dependency.reference_id.clone(),
+                existing_public_path.clone(),
+            );
             assets.push(WorkspaceAssetResult {
                 reference_id: dependency.reference_id.clone(),
                 source_path: Some(display_path(&source_path)),
@@ -552,7 +653,13 @@ fn write_assets(
         }
         used_names.insert(file_name.clone());
         let target = target_asset_dir.join(&file_name);
-        write_image(&bytes, &mime, &target, &mut warnings, &dependency.reference_id)?;
+        write_image(
+            &bytes,
+            &mime,
+            &target,
+            &mut warnings,
+            &dependency.reference_id,
+        )?;
         let public_path = format!("/assets/notes/{slug}/{file_name}");
         rewrites.insert(dependency.reference_id.clone(), public_path.clone());
         seen_hashes.insert(sha.clone(), public_path.clone());
@@ -570,12 +677,21 @@ fn write_assets(
     Ok((assets, rewrites, warnings))
 }
 
-fn write_image(bytes: &[u8], mime: &str, target: &Path, warnings: &mut Vec<PublishWarning>, reference_id: &str) -> Result<(), DesktopCommandError> {
+fn write_image(
+    bytes: &[u8],
+    mime: &str,
+    target: &Path,
+    warnings: &mut Vec<PublishWarning>,
+    reference_id: &str,
+) -> Result<(), DesktopCommandError> {
     if mime == "image/png" || mime == "image/jpeg" {
         match image::load_from_memory(bytes) {
             Ok(image) => {
-                let mut file = fs::File::create(target).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
-                image.write_to(&mut file, image::ImageFormat::WebP).map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+                let mut file = fs::File::create(target)
+                    .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
+                image
+                    .write_to(&mut file, image::ImageFormat::WebP)
+                    .map_err(|_| DesktopCommandError::WorkspaceWriteFailed)?;
             }
             Err(_) => return Err(DesktopCommandError::UnsupportedImageType),
         }
@@ -585,7 +701,7 @@ fn write_image(bytes: &[u8], mime: &str, target: &Path, warnings: &mut Vec<Publi
     if mime == "image/jpeg" {
         warnings.push(PublishWarning {
             code: "LOSSLESS_NOT_GUARANTEED".to_string(),
-            message: "JPEG 宸茶浆鎹负 WebP锛涗唬鐮佹埅鍥炬竻鏅板害闇€瑕佸湪棰勮涓‘璁ゃ€?.to_string(),
+            message: "JPEG 已转换为 WebP；代码截图清晰度需要在预览中确认。".to_string(),
             reference_id: Some(reference_id.to_string()),
             path: Some(display_path(target)),
         });
@@ -603,21 +719,115 @@ fn validate_workspace(
     warnings: Vec<PublishWarning>,
 ) -> PublishValidationResult {
     let mut checks = Vec::new();
-    push_check(&mut checks, "markdown_exists", "鐩爣 Markdown 宸茬敓鎴?, target_markdown.exists(), None);
-    push_check(&mut checks, "front_matter_valid", "Front Matter 宸插啓鍏?archiveProfile", true, None);
-    push_check(&mut checks, "archive_profile_exists", "褰掓。鏂规 ID 瀛樺湪", !profile.id.trim().is_empty(), None);
-    push_check(&mut checks, "markdown_in_content", "Markdown 浣嶄簬 content 涓?, display_path(target_markdown).contains("\\content\\") || display_path(target_markdown).contains("/content/"), None);
-    push_check(&mut checks, "assets_allowed_dir", "鍥剧墖浣嶄簬 public/assets/notes 涓?, display_path(target_asset_dir).contains("assets"), None);
-    push_check(&mut checks, "local_refs_rewritten", "鏈湴鍥剧墖寮曠敤宸查噸鍐?, assets.iter().all(|asset| asset.status != "blocked"), None);
-    push_check(&mut checks, "no_absolute_machine_paths", "Markdown 涓嶅寘鍚湰鏈虹粷瀵瑰浘鐗囪矾寰?, fs::read_to_string(target_markdown).map(|body| !body.contains(":\\") && !body.contains("file://")).unwrap_or(false), None);
-    push_check(&mut checks, "no_missing_images", "娌℃湁缂哄け鍥剧墖", assets.iter().all(|asset| asset.status != "blocked"), None);
-    push_check(&mut checks, "no_ambiguous_images", "娌℃湁澶氬€欓€夊浘鐗?, true, None);
-    push_check(&mut checks, "no_unsafe_paths", "娌℃湁涓嶅畨鍏ㄨ矾寰?, true, None);
-    push_check(&mut checks, "output_images_exist", "杈撳嚭鍥剧墖瀛樺湪", assets.iter().filter(|asset| asset.status == "written").all(|asset| asset.target_path.as_ref().is_some_and(|path| Path::new(path).exists())), None);
-    push_check(&mut checks, "mime_matches_extension", "鍥剧墖鎵╁睍鍚嶄笌杈撳嚭绛栫暐涓€鑷?, true, None);
-    push_check(&mut checks, "slug_valid", "Slug 鍚堟硶", is_safe_slug(&article.slug), None);
-    push_check(&mut checks, "no_parent_segments", "杈撳嚭璺緞涓嶅寘鍚?..", !display_path(workspace).contains(".."), None);
-    push_check(&mut checks, "manifest_consistent", "Manifest 鍙敱褰撳墠缁撴灉鐢熸垚", true, None);
+    push_check(
+        &mut checks,
+        "markdown_exists",
+        "目标 Markdown 已生成",
+        target_markdown.exists(),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "front_matter_valid",
+        "Front Matter 已写入 archiveProfile",
+        true,
+        None,
+    );
+    push_check(
+        &mut checks,
+        "archive_profile_exists",
+        "归档方案 ID 存在",
+        !profile.id.trim().is_empty(),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "markdown_in_content",
+        "Markdown 位于 content 中",
+        display_path(target_markdown).contains("/content/"),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "assets_allowed_dir",
+        "图片位于 public/assets/notes 中",
+        display_path(target_asset_dir).contains("/assets/notes/"),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "local_refs_rewritten",
+        "本地图片引用已重写",
+        assets.iter().all(|asset| asset.status != "blocked"),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "no_absolute_machine_paths",
+        "Markdown 不包含本机绝对图片路径",
+        fs::read_to_string(target_markdown)
+            .map(|body| !body.contains(":\\") && !body.contains("file://"))
+            .unwrap_or(false),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "no_missing_images",
+        "没有缺失图片",
+        assets.iter().all(|asset| asset.status != "blocked"),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "no_ambiguous_images",
+        "没有多候选图片",
+        true,
+        None,
+    );
+    push_check(&mut checks, "no_unsafe_paths", "没有不安全路径", true, None);
+    push_check(
+        &mut checks,
+        "output_images_exist",
+        "输出图片存在",
+        assets
+            .iter()
+            .filter(|asset| asset.status == "written")
+            .all(|asset| {
+                asset
+                    .target_path
+                    .as_ref()
+                    .is_some_and(|path| Path::new(path).exists())
+            }),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "mime_matches_extension",
+        "图片扩展名与输出策略一致",
+        true,
+        None,
+    );
+    push_check(
+        &mut checks,
+        "slug_valid",
+        "Slug 合法",
+        is_safe_slug(&article.slug),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "no_parent_segments",
+        "输出路径不包含 ..",
+        !display_path(workspace).contains(".."),
+        None,
+    );
+    push_check(
+        &mut checks,
+        "manifest_consistent",
+        "Manifest 可由当前结果生成",
+        true,
+        None,
+    );
     PublishValidationResult {
         passed: checks.iter().all(|check| check.passed),
         checks,
@@ -625,7 +835,13 @@ fn validate_workspace(
     }
 }
 
-fn push_check(checks: &mut Vec<PublishValidationCheck>, code: &str, label: &str, passed: bool, message: Option<String>) {
+fn push_check(
+    checks: &mut Vec<PublishValidationCheck>,
+    code: &str,
+    label: &str,
+    passed: bool,
+    message: Option<String>,
+) {
     checks.push(PublishValidationCheck {
         code: code.to_string(),
         label: label.to_string(),
@@ -634,7 +850,11 @@ fn push_check(checks: &mut Vec<PublishValidationCheck>, code: &str, label: &str,
     });
 }
 
-fn write_front_matter(markdown: &str, article: &ArticleInfoDto, profile: &ArchiveProfileDto) -> String {
+fn write_front_matter(
+    markdown: &str,
+    article: &ArticleInfoDto,
+    profile: &ArchiveProfileDto,
+) -> String {
     let body = strip_front_matter(markdown);
     let mut fields = BTreeMap::new();
     fields.insert("title", json_string(&article.title));
@@ -665,12 +885,20 @@ fn write_front_matter(markdown: &str, article: &ArticleInfoDto, profile: &Archiv
     format!("---\n{}---\n\n{}", yaml, body.trim_start())
 }
 
-fn rewrite_markdown_sources(markdown: &str, references: &[MarkdownImageReferenceDto], rewrites: &HashMap<String, String>) -> String {
+fn rewrite_markdown_sources(
+    markdown: &str,
+    references: &[MarkdownImageReferenceDto],
+    rewrites: &HashMap<String, String>,
+) -> String {
     let mut output = markdown.to_string();
     for reference in references {
         if let Some(next) = rewrites.get(&reference.id) {
             if reference.kind == "obsidian" {
-                output = output.replacen(&reference.raw, &format!("![{}]({})", reference.alt.clone().unwrap_or_default(), next), 1);
+                output = output.replacen(
+                    &reference.raw,
+                    &format!("![{}]({})", reference.alt.clone().unwrap_or_default(), next),
+                    1,
+                );
             } else {
                 output = output.replacen(&reference.source, next, 1);
             }
@@ -679,16 +907,32 @@ fn rewrite_markdown_sources(markdown: &str, references: &[MarkdownImageReference
     output
 }
 
-fn resolve_obsidian(reference: &MarkdownImageReferenceDto, markdown_dir: &Path, obsidian: Option<&ObsidianOptions>) -> Result<ResolvedImageDependencyDto, DesktopCommandError> {
-    let file_name = Path::new(&reference.source).file_name().and_then(OsStr::to_str).unwrap_or(&reference.source);
-    let mut candidates = vec![markdown_dir.join(file_name), markdown_dir.join("attachments").join(file_name), markdown_dir.join("assets").join(file_name), markdown_dir.join("images").join(file_name)];
+fn resolve_obsidian(
+    reference: &MarkdownImageReferenceDto,
+    markdown_dir: &Path,
+    obsidian: Option<&ObsidianOptions>,
+) -> Result<ResolvedImageDependencyDto, DesktopCommandError> {
+    let file_name = Path::new(&reference.source)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(&reference.source);
+    let mut candidates = vec![
+        markdown_dir.join(file_name),
+        markdown_dir.join("attachments").join(file_name),
+        markdown_dir.join("assets").join(file_name),
+        markdown_dir.join("images").join(file_name),
+    ];
     if let Some(options) = obsidian {
         for directory in options.attachment_directories.as_deref().unwrap_or(&[]) {
             candidates.push(PathBuf::from(directory).join(file_name));
         }
         if options.enabled.unwrap_or(false) {
             if let Some(root) = &options.vault_root {
-                for entry in WalkDir::new(root).max_depth(8).into_iter().filter_map(Result::ok) {
+                for entry in WalkDir::new(root)
+                    .max_depth(8)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                {
                     if entry.file_type().is_file() && entry.file_name() == file_name {
                         candidates.push(entry.path().to_path_buf());
                     }
@@ -696,7 +940,10 @@ fn resolve_obsidian(reference: &MarkdownImageReferenceDto, markdown_dir: &Path, 
             }
         }
     }
-    let existing: Vec<_> = candidates.into_iter().filter(|path| path.is_file()).collect();
+    let existing: Vec<_> = candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect();
     if existing.len() > 1 {
         return Ok(ResolvedImageDependencyDto {
             reference_id: reference.id.clone(),
@@ -707,8 +954,13 @@ fn resolve_obsidian(reference: &MarkdownImageReferenceDto, markdown_dir: &Path, 
             mime_type: None,
             size: None,
             sha256: None,
-            message: Some("鎵惧埌澶氫釜鍚屽悕鍥剧墖鍊欓€夛紝闇€瑕佹墜鍔ㄩ€夋嫨銆?.to_string()),
-            candidates: Some(existing.iter().filter_map(|path| candidate_dto(path).ok()).collect()),
+            message: Some("找到多个同名图片候选，需要手动选择。".to_string()),
+            candidates: Some(
+                existing
+                    .iter()
+                    .filter_map(|path| candidate_dto(path).ok())
+                    .collect(),
+            ),
         });
     }
     let fallback = markdown_dir.join(file_name);
@@ -716,7 +968,10 @@ fn resolve_obsidian(reference: &MarkdownImageReferenceDto, markdown_dir: &Path, 
     Ok(resolve_candidate(reference, selected))
 }
 
-fn resolve_candidate(reference: &MarkdownImageReferenceDto, candidate: &Path) -> ResolvedImageDependencyDto {
+fn resolve_candidate(
+    reference: &MarkdownImageReferenceDto,
+    candidate: &Path,
+) -> ResolvedImageDependencyDto {
     let metadata = match fs::metadata(candidate) {
         Ok(value) => value,
         Err(_) => {
@@ -725,25 +980,30 @@ fn resolve_candidate(reference: &MarkdownImageReferenceDto, candidate: &Path) ->
                 original_source: reference.source.clone(),
                 status: "missing".to_string(),
                 resolved_path: Some(display_path(candidate)),
-                file_name: candidate.file_name().and_then(OsStr::to_str).map(str::to_string),
+                file_name: candidate
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .map(str::to_string),
                 mime_type: None,
                 size: None,
                 sha256: None,
-                message: Some("鎵句笉鍒?Markdown 寮曠敤鐨勬湰鍦板浘鐗囥€?.to_string()),
+                message: Some("找不到 Markdown 引用的本地图片。".to_string()),
                 candidates: None,
             };
         }
     };
     if !metadata.is_file() {
-        return blocked_dependency(reference, "unsupported", "鍥剧墖寮曠敤鎸囧悜鐨勪笉鏄櫘閫氭枃浠躲€?);
+        return blocked_dependency(reference, "unsupported", "图片引用指向的不是普通文件。");
     }
     let bytes = match fs::read(candidate) {
         Ok(value) => value,
-        Err(_) => return blocked_dependency(reference, "unsupported", "鍥剧墖鏂囦欢涓嶅彲璇诲彇銆?),
+        Err(_) => return blocked_dependency(reference, "unsupported", "图片文件不可读取。"),
     };
     let mime = match detect_image_mime(&bytes) {
         Some(value) => value,
-        None => return blocked_dependency(reference, "unsupported", "鏂囦欢鍐呭涓嶆槸鍙楁敮鎸佺殑鍥剧墖鏍煎紡銆?),
+        None => {
+            return blocked_dependency(reference, "unsupported", "文件内容不是受支持的图片格式。")
+        }
     };
     if !extension_matches_mime(candidate, mime) {
         return blocked_dependency(reference, "unsupported", "图片真实类型与扩展名不匹配。");
@@ -756,7 +1016,10 @@ fn resolve_candidate(reference: &MarkdownImageReferenceDto, candidate: &Path) ->
         original_source: reference.source.clone(),
         status: "resolved".to_string(),
         resolved_path: Some(display_path(candidate)),
-        file_name: candidate.file_name().and_then(OsStr::to_str).map(str::to_string),
+        file_name: candidate
+            .file_name()
+            .and_then(OsStr::to_str)
+            .map(str::to_string),
         mime_type: Some(mime.to_string()),
         size: Some(metadata.len()),
         sha256: Some(sha256_hex(&bytes)),
@@ -770,7 +1033,11 @@ fn candidate_dto(path: &Path) -> Result<ImageCandidateDto, DesktopCommandError> 
     let bytes = fs::read(path).map_err(|_| DesktopCommandError::FileNotReadable)?;
     Ok(ImageCandidateDto {
         absolute_path: display_path(path),
-        file_name: path.file_name().and_then(OsStr::to_str).unwrap_or("image").to_string(),
+        file_name: path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("image")
+            .to_string(),
         size: metadata.len(),
         mime_type: detect_image_mime(&bytes).map(str::to_string),
         sha256: Some(sha256_hex(&bytes)),
@@ -783,12 +1050,17 @@ fn normalize_source(base: &Path, source: &str) -> Result<PathBuf, DesktopCommand
         return Err(DesktopCommandError::UnsafePath);
     }
     let path = PathBuf::from(decoded);
-    Ok(if path.is_absolute() { path } else { base.join(path) })
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    })
 }
 
 fn unsafe_source(source: &str) -> bool {
     let path = Path::new(source);
-    path.components().any(|component| matches!(component, Component::ParentDir))
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn is_safe_workspace_id(value: &str) -> bool {
@@ -816,7 +1088,11 @@ fn ensure_child(parent: &Path, child: &Path) -> Result<(), DesktopCommandError> 
 }
 
 fn safe_profile_markdown_path(directory: &str, slug: &str) -> Result<PathBuf, DesktopCommandError> {
-    if !is_safe_slug(slug) || directory.starts_with('/') || directory.contains('\\') || directory.contains("..") {
+    if !is_safe_slug(slug)
+        || directory.starts_with('/')
+        || directory.contains('\\')
+        || directory.contains("..")
+    {
         return Err(DesktopCommandError::UnsafePath);
     }
     let path = PathBuf::from(directory).join(format!("{slug}.md"));
@@ -827,11 +1103,17 @@ fn safe_profile_markdown_path(directory: &str, slug: &str) -> Result<PathBuf, De
 }
 
 fn is_safe_slug(value: &str) -> bool {
-    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 fn safe_file_stem(file_name: &str) -> String {
-    let stem = Path::new(file_name).file_stem().and_then(OsStr::to_str).unwrap_or("image");
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("image");
     let mut output = String::new();
     for ch in stem.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -902,7 +1184,10 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else if bytes.get(4..12) == Some(b"ftypavif") || bytes.get(4..12) == Some(b"ftypavis") {
         Some("image/avif")
-    } else if std::str::from_utf8(bytes).ok().is_some_and(|text| text.trim_start().starts_with("<svg")) {
+    } else if std::str::from_utf8(bytes)
+        .ok()
+        .is_some_and(|text| text.trim_start().starts_with("<svg"))
+    {
         Some("image/svg+xml")
     } else {
         None
@@ -919,18 +1204,25 @@ fn remote_dependency(reference: &MarkdownImageReferenceDto) -> ResolvedImageDepe
         mime_type: None,
         size: None,
         sha256: None,
-        message: Some("杩滅▼鍥剧墖浼氫繚鐣欏師濮?URL锛屾湰杞笉浼氳嚜鍔ㄤ笅杞姐€?.to_string()),
+        message: Some("远程图片会保留原始 URL，本轮不会自动下载。".to_string()),
         candidates: None,
     }
 }
 
-fn blocked_dependency(reference: &MarkdownImageReferenceDto, status: &str, message: &str) -> ResolvedImageDependencyDto {
+fn blocked_dependency(
+    reference: &MarkdownImageReferenceDto,
+    status: &str,
+    message: &str,
+) -> ResolvedImageDependencyDto {
     ResolvedImageDependencyDto {
         reference_id: reference.id.clone(),
         original_source: reference.source.clone(),
         status: status.to_string(),
         resolved_path: None,
-        file_name: Path::new(&reference.source).file_name().and_then(OsStr::to_str).map(str::to_string),
+        file_name: Path::new(&reference.source)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .map(str::to_string),
         mime_type: None,
         size: None,
         sha256: None,
@@ -966,7 +1258,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn png_bytes() -> Vec<u8> {
-        vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 15, 4, 0, 9, 251, 3, 253, 167, 159, 129, 80, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]
+        vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 15, 4,
+            0, 9, 251, 3, 253, 167, 159, 129, 80, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ]
     }
 
     fn reference(source: &str, kind: &str) -> MarkdownImageReferenceDto {
@@ -974,7 +1270,7 @@ mod tests {
             id: "image-001".to_string(),
             raw: source.to_string(),
             source: source.to_string(),
-            alt: Some("鍥?.to_string()),
+            alt: Some("图".to_string()),
             title: None,
             kind: kind.to_string(),
             path_kind: "relative".to_string(),
@@ -998,7 +1294,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let file = dir.path().join("note.txt");
         fs::write(&file, "# Title").unwrap();
-        assert!(matches!(read_markdown_file(&file, MAX_MARKDOWN_SIZE), Err(DesktopCommandError::UnsupportedFileExtension)));
+        assert!(matches!(
+            read_markdown_file(&file, MAX_MARKDOWN_SIZE),
+            Err(DesktopCommandError::UnsupportedFileExtension)
+        ));
     }
 
     #[test]
@@ -1006,7 +1305,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let file = dir.path().join("note.md");
         fs::write(&file, "abc").unwrap();
-        assert!(matches!(read_markdown_file(&file, 1), Err(DesktopCommandError::FileTooLarge)));
+        assert!(matches!(
+            read_markdown_file(&file, 1),
+            Err(DesktopCommandError::FileTooLarge)
+        ));
     }
 
     #[test]
@@ -1040,7 +1342,10 @@ mod tests {
     #[test]
     fn detects_missing_image() {
         let dir = tempdir().unwrap();
-        let result = resolve_candidate(&reference("missing.png", "markdown"), &dir.path().join("missing.png"));
+        let result = resolve_candidate(
+            &reference("missing.png", "markdown"),
+            &dir.path().join("missing.png"),
+        );
         assert_eq!(result.status, "missing");
     }
 
@@ -1102,4 +1407,3 @@ mod tests {
         fs::remove_dir_all(result.workspace_path).unwrap();
     }
 }
-
