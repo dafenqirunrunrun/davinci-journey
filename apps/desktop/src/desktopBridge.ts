@@ -15,6 +15,7 @@ export type DesktopCommandErrorCode =
   | "IMAGE_NOT_FOUND"
   | "AMBIGUOUS_IMAGE_REFERENCE"
   | "IMAGE_MIME_MISMATCH"
+  | "UNSAFE_SVG"
   | "WORKSPACE_CREATE_FAILED"
   | "WORKSPACE_WRITE_FAILED"
   | "WORKSPACE_VALIDATION_FAILED";
@@ -22,7 +23,9 @@ export type DesktopCommandErrorCode =
 export interface DesktopCommandError {
   code: DesktopCommandErrorCode;
   message: string;
-  details?: Record<string, unknown>;
+  technicalMessage?: string;
+  affectedPath?: string;
+  recoverable: boolean;
 }
 
 export interface SelectMarkdownFileRequest {
@@ -107,7 +110,7 @@ export interface DesktopBridge {
   resolveImageDependencies(request: ResolveImageDependenciesRequest): Promise<ResolvedImageDependencyDto[]>;
   generatePublishWorkspace(request: GeneratePublishWorkspaceRequest): Promise<GeneratePublishWorkspaceResult>;
   discardPublishWorkspace(workspaceId: string): Promise<void>;
-  revealPath(path: string): Promise<void>;
+  revealPublishWorkspace(path: string): Promise<void>;
 }
 
 const MAX_MARKDOWN_SIZE = 10 * 1024 * 1024;
@@ -125,6 +128,7 @@ const errorMessages: Record<DesktopCommandErrorCode, string> = {
   IMAGE_NOT_FOUND: "找不到 Markdown 引用的本地图片。",
   AMBIGUOUS_IMAGE_REFERENCE: "找到多个同名图片候选，需要手动选择。",
   IMAGE_MIME_MISMATCH: "图片真实类型与扩展名不匹配。",
+  UNSAFE_SVG: "SVG 包含不安全内容，已阻止写入。",
   WORKSPACE_CREATE_FAILED: "创建临时发布工作区失败。",
   WORKSPACE_WRITE_FAILED: "写入临时发布工作区失败。",
   WORKSPACE_VALIDATION_FAILED: "临时发布工作区校验失败。"
@@ -141,7 +145,7 @@ export function isCancelError(error: unknown): boolean {
   return isDesktopCommandError(error) && error.code === "FILE_SELECTION_CANCELLED";
 }
 
-function isDesktopCommandError(error: unknown): error is DesktopCommandError {
+export function isDesktopCommandError(error: unknown): error is DesktopCommandError {
   return Boolean(error && typeof error === "object" && "code" in error && typeof (error as DesktopCommandError).code === "string");
 }
 
@@ -154,14 +158,23 @@ function hasTauriRuntime(): boolean {
   return Boolean((globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 }
 
+function commandError(code: DesktopCommandErrorCode, message = errorMessages[code]): DesktopCommandError {
+  return {
+    code,
+    message,
+    recoverable: code !== "INVALID_TEXT_ENCODING"
+  };
+}
+
 async function selectedFileFromBrowser(file: File): Promise<SelectedMarkdownFileDto> {
   const ext = file.name.toLowerCase().split(".").pop();
   if (!["md", "markdown"].includes(ext ?? "")) {
-    throw { code: "UNSUPPORTED_FILE_EXTENSION", message: errorMessages.UNSUPPORTED_FILE_EXTENSION } satisfies DesktopCommandError;
+    throw commandError("UNSUPPORTED_FILE_EXTENSION");
   }
   if (file.size > MAX_MARKDOWN_SIZE) {
-    throw { code: "FILE_TOO_LARGE", message: errorMessages.FILE_TOO_LARGE } satisfies DesktopCommandError;
+    throw commandError("FILE_TOO_LARGE");
   }
+
   const content =
     typeof file.text === "function"
       ? await file.text()
@@ -171,12 +184,15 @@ async function selectedFileFromBrowser(file: File): Promise<SelectedMarkdownFile
           reader.onerror = () => reject(reader.error ?? new Error(errorMessages.FILE_NOT_READABLE));
           reader.readAsText(file, "utf-8");
         });
+
   if (content.includes("\u0000")) {
-    throw { code: "INVALID_TEXT_ENCODING", message: errorMessages.INVALID_TEXT_ENCODING } satisfies DesktopCommandError;
+    throw commandError("INVALID_TEXT_ENCODING");
   }
+
   const bytes = new TextEncoder().encode(content);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const sourceFingerprint = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
   return {
     absolutePath: "",
     fileName: file.name,
@@ -190,17 +206,29 @@ async function selectedFileFromBrowser(file: File): Promise<SelectedMarkdownFile
 
 function browserDependency(reference: MarkdownImageReference): ResolvedImageDependencyDto {
   if (reference.pathKind === "remote") {
-    return { referenceId: reference.id, originalSource: reference.source, status: "remote", message: "远程图片会保留原始 URL，本轮不会自动下载。" };
+    return {
+      referenceId: reference.id,
+      originalSource: reference.source,
+      status: "remote",
+      message: "远程图片会保留原始 URL，本轮不会自动下载。"
+    };
   }
+
   if (reference.pathKind === "embedded") {
-    return { referenceId: reference.id, originalSource: "data:image/*;base64,...", status: "embedded", message: "Base64 图片需要在 Tauri 模式下提取或阻止生成工作区。" };
+    return {
+      referenceId: reference.id,
+      originalSource: "data:image/*;base64,...",
+      status: "embedded",
+      message: "Base64 图片需要在 Tauri 模式下提取，当前阻止生成工作区。"
+    };
   }
+
   return {
     referenceId: reference.id,
     originalSource: reference.source,
     status: "missing",
     fileName: reference.source.split(/[\\/]/).pop(),
-    message: "浏览器预览模式无法读取 Markdown 相邻图片；请在 Tauri 桌面模式下生成真实依赖状态。"
+    message: "浏览器预览模式无法读取 Markdown 相邻图片，请在 Tauri 桌面模式下生成真实依赖状态。"
   };
 }
 
@@ -209,19 +237,19 @@ export function createBrowserBridge(filePicker: () => Promise<File | undefined>)
     mode: "browser",
     async selectMarkdownFile() {
       const file = await filePicker();
-      if (!file) throw { code: "FILE_SELECTION_CANCELLED", message: errorMessages.FILE_SELECTION_CANCELLED } satisfies DesktopCommandError;
+      if (!file) throw commandError("FILE_SELECTION_CANCELLED");
       return selectedFileFromBrowser(file);
     },
     async resolveImageDependencies(request) {
       return request.references.map(browserDependency);
     },
     async generatePublishWorkspace() {
-      throw { code: "WORKSPACE_CREATE_FAILED", message: "浏览器预览模式不能写入临时发布工作区，请使用 Tauri 桌面模式。" } satisfies DesktopCommandError;
+      throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不能写入临时发布工作区，请使用 Tauri 桌面模式。");
     },
     async discardPublishWorkspace() {
       return undefined;
     },
-    async revealPath() {
+    async revealPublishWorkspace() {
       return undefined;
     }
   };
@@ -234,7 +262,7 @@ export function createTauriBridge(): DesktopBridge {
     resolveImageDependencies: (request) => invokeTauri("resolve_image_dependencies", { request }),
     generatePublishWorkspace: (request) => invokeTauri("generate_publish_workspace", { request }),
     discardPublishWorkspace: (workspaceId) => invokeTauri("discard_publish_workspace", { workspaceId }),
-    revealPath: (path) => invokeTauri("reveal_path", { path })
+    revealPublishWorkspace: (path) => invokeTauri("reveal_publish_workspace", { path })
   };
 }
 

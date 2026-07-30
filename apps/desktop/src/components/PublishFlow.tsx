@@ -254,7 +254,11 @@ export function PublishFlow() {
         <div className="panel upload-panel" onDragOver={(event) => event.preventDefault()}>
           <p className="eyebrow">第 1 步</p>
           <h2>选择 Markdown</h2>
-          <p className="muted-text">{bridge.mode === "tauri" ? "Tauri 桌面模式会读取真实文件路径，并在下一步解析相邻图片。" : "浏览器预览模式只能读取 Markdown 内容，不能访问相邻图片或生成临时发布工作区。"}</p>
+          <p className="muted-text">
+            {bridge.mode === "tauri"
+              ? "Tauri 桌面模式会读取真实文件路径，并在下一步解析相邻图片。"
+              : "浏览器预览模式只能读取 Markdown 内容，不能访问相邻图片或生成临时发布工作区。"}
+          </p>
           <input ref={inputRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown" onChange={(event) => void handleBrowserInput(event.target.files?.[0])} />
           <button className="primary-button" type="button" onClick={() => void selectMarkdown()}>
             选择 Markdown 文件
@@ -325,7 +329,11 @@ export function PublishFlow() {
                   </span>
                   <span aria-hidden="true">→</span>
                 </button>
-                <ul className="reason-list">{recommendation.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                <ul className="reason-list">
+                  {recommendation.reasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
               </article>
             )}
             <LabeledInput label="搜索归档方案" value={search} onChange={setSearch} />
@@ -343,7 +351,7 @@ export function PublishFlow() {
             </div>
           </div>
           <aside className="panel preview-panel">
-            <StepHeader title={selectedProfile?.name ?? "未选择"} eyebrow="最终结构预览" />
+            <StepHeader title={selectedProfile?.name ?? "未选择"} eyebrow="最终结果预览" />
             <PathBlock title="Markdown" value={draft.preview.markdownPath ?? ""} testId="markdown-path" />
             <PathBlock title="图片资源" value={draft.preview.assetDirectory ?? ""} testId="image-path" />
             {draft.archive.pendingProfileChanges.length > 0 && <p className="warning-text">新建归档方案只保存在当前发布草稿中，本轮不会直接写入 archive-profiles.yml。</p>}
@@ -422,7 +430,7 @@ function WorkspaceResult({ bridge, result, onDiscard, onRegenerate }: { bridge: 
         ))}
       </div>
       <div className="actions">
-        <button className="secondary-button" type="button" onClick={() => void bridge.revealPath(result.workspacePath)}>
+        <button className="secondary-button" type="button" onClick={() => void bridge.revealPublishWorkspace(result.workspacePath)}>
           在文件管理器中查看
         </button>
         <button className="secondary-button" type="button" onClick={onRegenerate}>

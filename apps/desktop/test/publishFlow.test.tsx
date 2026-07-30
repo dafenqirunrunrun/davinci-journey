@@ -27,7 +27,7 @@ describe("PublishFlow", () => {
     expect(screen.getByText("检测图片：1")).toBeInTheDocument();
   });
 
-  it("图片缺失阻止最终发布提示", async () => {
+  it("图片缺失显示工作区生成前的阻断提示", async () => {
     await selectMarkdown();
     expect(screen.getByText(/生成正式工作区前必须处理/)).toBeInTheDocument();
   });
@@ -50,7 +50,7 @@ describe("PublishFlow", () => {
     expect(screen.getByText("缺失：1")).toBeInTheDocument();
   });
 
-  it("新建归档方案只进入待提交变更", async () => {
+  it("新建归档方案只进入待提交变更并自动选中", async () => {
     await selectMarkdown();
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));

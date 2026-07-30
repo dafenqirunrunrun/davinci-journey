@@ -1,52 +1,35 @@
-use chrono::Utc;
+﻿use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
     fs,
-    io::Write,
     path::{Component, Path, PathBuf},
 };
-use thiserror::Error;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 const MAX_MARKDOWN_SIZE: u64 = 10 * 1024 * 1024;
 const WORKSPACE_VERSION: u8 = 1;
 
-#[derive(Debug, Error, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy)]
 pub enum DesktopCommandError {
-    #[error("已取消选择 Markdown 文件。")]
     FileSelectionCancelled,
-    #[error("文件扩展名不受支持，请选择 .md 或 .markdown 文件。")]
     UnsupportedFileExtension,
-    #[error("Markdown 文件过大，当前上限为 10 MB。")]
     FileTooLarge,
-    #[error("找不到指定文件。")]
     FileNotFound,
-    #[error("文件不可读取，请检查权限。")]
     FileNotReadable,
-    #[error("文件不是有效的 UTF-8 Markdown 文本。")]
     InvalidTextEncoding,
-    #[error("路径不安全，已阻止越界访问。")]
     UnsafePath,
-    #[error("目标不是普通文件。")]
     NotARegularFile,
-    #[error("图片格式暂不支持。")]
     UnsupportedImageType,
-    #[error("找不到 Markdown 引用的本地图片。")]
     ImageNotFound,
-    #[error("找到多个同名图片候选，需要手动选择。")]
     AmbiguousImageReference,
-    #[error("图片真实类型与扩展名不匹配。")]
     ImageMimeMismatch,
-    #[error("创建临时发布工作区失败。")]
+    UnsafeSvg,
     WorkspaceCreateFailed,
-    #[error("写入临时发布工作区失败。")]
     WorkspaceWriteFailed,
-    #[error("临时发布工作区校验失败。")]
     WorkspaceValidationFailed,
 }
 
@@ -65,10 +48,36 @@ impl DesktopCommandError {
             Self::ImageNotFound => "IMAGE_NOT_FOUND",
             Self::AmbiguousImageReference => "AMBIGUOUS_IMAGE_REFERENCE",
             Self::ImageMimeMismatch => "IMAGE_MIME_MISMATCH",
+            Self::UnsafeSvg => "UNSAFE_SVG",
             Self::WorkspaceCreateFailed => "WORKSPACE_CREATE_FAILED",
             Self::WorkspaceWriteFailed => "WORKSPACE_WRITE_FAILED",
             Self::WorkspaceValidationFailed => "WORKSPACE_VALIDATION_FAILED",
         }
+    }
+
+    fn message(&self) -> &'static str {
+        match self {
+            Self::FileSelectionCancelled => "已取消选择 Markdown 文件。",
+            Self::UnsupportedFileExtension => "文件扩展名不受支持，请选择 .md 或 .markdown 文件。",
+            Self::FileTooLarge => "Markdown 文件过大，当前上限为 10 MB。",
+            Self::FileNotFound => "找不到指定文件。",
+            Self::FileNotReadable => "文件不可读取，请检查权限。",
+            Self::InvalidTextEncoding => "文件不是有效的 UTF-8 Markdown 文本。",
+            Self::UnsafePath => "路径不安全，已阻止越界访问。",
+            Self::NotARegularFile => "目标不是普通文件。",
+            Self::UnsupportedImageType => "图片格式暂不支持。",
+            Self::ImageNotFound => "找不到 Markdown 引用的本地图片。",
+            Self::AmbiguousImageReference => "找到多个同名图片候选，需要手动选择。",
+            Self::ImageMimeMismatch => "图片真实类型与扩展名不匹配。",
+            Self::UnsafeSvg => "SVG 包含不安全内容，已阻止写入。",
+            Self::WorkspaceCreateFailed => "创建临时发布工作区失败。",
+            Self::WorkspaceWriteFailed => "写入临时发布工作区失败。",
+            Self::WorkspaceValidationFailed => "临时发布工作区校验失败。",
+        }
+    }
+
+    fn recoverable(&self) -> bool {
+        !matches!(self, Self::InvalidTextEncoding | Self::UnsafePath | Self::UnsafeSvg)
     }
 }
 
@@ -77,13 +86,19 @@ impl DesktopCommandError {
 pub struct CommandErrorDto {
     code: String,
     message: String,
+    technical_message: Option<String>,
+    affected_path: Option<String>,
+    recoverable: bool,
 }
 
 impl From<DesktopCommandError> for CommandErrorDto {
     fn from(value: DesktopCommandError) -> Self {
         Self {
             code: value.code().to_string(),
-            message: value.to_string(),
+            message: value.message().to_string(),
+            technical_message: None,
+            affected_path: None,
+            recoverable: value.recoverable(),
         }
     }
 }
@@ -290,8 +305,15 @@ pub fn generate_publish_workspace(request: GeneratePublishWorkspaceRequest) -> C
 #[tauri::command]
 pub fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
     let root = repository_root();
-    let workspace = root.join(".publish-workspaces").join(workspace_id);
-    ensure_child(&root.join(".publish-workspaces"), &workspace).map_err(CommandErrorDto::from)?;
+    if !is_safe_workspace_id(&workspace_id) {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
+    let workspace_root = root.join(".publish-workspaces");
+    let workspace = workspace_root.join(workspace_id);
+    ensure_child(&workspace_root, &workspace).map_err(CommandErrorDto::from)?;
+    if workspace == workspace_root || is_symlink(&workspace) {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
     if workspace.exists() {
         fs::remove_dir_all(workspace).map_err(|_| CommandErrorDto::from(DesktopCommandError::WorkspaceWriteFailed))?;
     }
@@ -299,7 +321,13 @@ pub fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
 }
 
 #[tauri::command]
-pub fn reveal_path(path: String) -> CommandResult<()> {
+pub fn reveal_publish_workspace(path: String) -> CommandResult<()> {
+    let root = repository_root().join(".publish-workspaces");
+    let target = PathBuf::from(&path);
+    ensure_child(&root, &target).map_err(CommandErrorDto::from)?;
+    if !target.is_dir() || is_symlink(&target) {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
@@ -317,7 +345,7 @@ pub fn run() {
             resolve_image_dependencies,
             generate_publish_workspace,
             discard_publish_workspace,
-            reveal_path
+            reveal_publish_workspace
         ])
         .run(tauri::generate_context!())
         .expect("failed to run desktop app");
@@ -370,11 +398,11 @@ fn resolve_dependencies(request: ResolveImageDependenciesRequest) -> Result<Vec<
             continue;
         }
         if reference.path_kind == "embedded" {
-            results.push(blocked_dependency(&reference, "embedded", "Base64 图片本轮暂不写入工作区，请先转换为本地图片。"));
+            results.push(blocked_dependency(&reference, "embedded", "Base64 鍥剧墖鏈疆鏆備笉鍐欏叆宸ヤ綔鍖猴紝璇峰厛杞崲涓烘湰鍦板浘鐗囥€?));
             continue;
         }
         if unsafe_source(&reference.source) {
-            results.push(blocked_dependency(&reference, "unsafe", "图片路径包含不安全片段，已阻止解析。"));
+            results.push(blocked_dependency(&reference, "unsafe", "鍥剧墖璺緞鍖呭惈涓嶅畨鍏ㄧ墖娈碉紝宸查樆姝㈣В鏋愩€?));
             continue;
         }
         if reference.kind == "obsidian" {
@@ -492,7 +520,7 @@ fn write_assets(
                 status: "blocked".to_string(),
                 warning: Some(PublishWarning {
                     code: "IMAGE_NOT_READY".to_string(),
-                    message: "图片尚未解析完成，已阻止写入工作区。".to_string(),
+                    message: "鍥剧墖灏氭湭瑙ｆ瀽瀹屾垚锛屽凡闃绘鍐欏叆宸ヤ綔鍖恒€?.to_string(),
                     reference_id: Some(dependency.reference_id.clone()),
                     path: dependency.resolved_path.clone(),
                 }),
@@ -557,7 +585,7 @@ fn write_image(bytes: &[u8], mime: &str, target: &Path, warnings: &mut Vec<Publi
     if mime == "image/jpeg" {
         warnings.push(PublishWarning {
             code: "LOSSLESS_NOT_GUARANTEED".to_string(),
-            message: "JPEG 已转换为 WebP；代码截图清晰度需要在预览中确认。".to_string(),
+            message: "JPEG 宸茶浆鎹负 WebP锛涗唬鐮佹埅鍥炬竻鏅板害闇€瑕佸湪棰勮涓‘璁ゃ€?.to_string(),
             reference_id: Some(reference_id.to_string()),
             path: Some(display_path(target)),
         });
@@ -575,21 +603,21 @@ fn validate_workspace(
     warnings: Vec<PublishWarning>,
 ) -> PublishValidationResult {
     let mut checks = Vec::new();
-    push_check(&mut checks, "markdown_exists", "目标 Markdown 已生成", target_markdown.exists(), None);
-    push_check(&mut checks, "front_matter_valid", "Front Matter 已写入 archiveProfile", true, None);
-    push_check(&mut checks, "archive_profile_exists", "归档方案 ID 存在", !profile.id.trim().is_empty(), None);
-    push_check(&mut checks, "markdown_in_content", "Markdown 位于 content 下", display_path(target_markdown).contains("\\content\\") || display_path(target_markdown).contains("/content/"), None);
-    push_check(&mut checks, "assets_allowed_dir", "图片位于 public/assets/notes 下", display_path(target_asset_dir).contains("assets"), None);
-    push_check(&mut checks, "local_refs_rewritten", "本地图片引用已重写", assets.iter().all(|asset| asset.status != "blocked"), None);
-    push_check(&mut checks, "no_absolute_machine_paths", "Markdown 不包含本机绝对图片路径", fs::read_to_string(target_markdown).map(|body| !body.contains(":\\") && !body.contains("file://")).unwrap_or(false), None);
-    push_check(&mut checks, "no_missing_images", "没有缺失图片", assets.iter().all(|asset| asset.status != "blocked"), None);
-    push_check(&mut checks, "no_ambiguous_images", "没有多候选图片", true, None);
-    push_check(&mut checks, "no_unsafe_paths", "没有不安全路径", true, None);
-    push_check(&mut checks, "output_images_exist", "输出图片存在", assets.iter().filter(|asset| asset.status == "written").all(|asset| asset.target_path.as_ref().is_some_and(|path| Path::new(path).exists())), None);
-    push_check(&mut checks, "mime_matches_extension", "图片扩展名与输出策略一致", true, None);
-    push_check(&mut checks, "slug_valid", "Slug 合法", is_safe_slug(&article.slug), None);
-    push_check(&mut checks, "no_parent_segments", "输出路径不包含 ..", !display_path(workspace).contains(".."), None);
-    push_check(&mut checks, "manifest_consistent", "Manifest 可由当前结果生成", true, None);
+    push_check(&mut checks, "markdown_exists", "鐩爣 Markdown 宸茬敓鎴?, target_markdown.exists(), None);
+    push_check(&mut checks, "front_matter_valid", "Front Matter 宸插啓鍏?archiveProfile", true, None);
+    push_check(&mut checks, "archive_profile_exists", "褰掓。鏂规 ID 瀛樺湪", !profile.id.trim().is_empty(), None);
+    push_check(&mut checks, "markdown_in_content", "Markdown 浣嶄簬 content 涓?, display_path(target_markdown).contains("\\content\\") || display_path(target_markdown).contains("/content/"), None);
+    push_check(&mut checks, "assets_allowed_dir", "鍥剧墖浣嶄簬 public/assets/notes 涓?, display_path(target_asset_dir).contains("assets"), None);
+    push_check(&mut checks, "local_refs_rewritten", "鏈湴鍥剧墖寮曠敤宸查噸鍐?, assets.iter().all(|asset| asset.status != "blocked"), None);
+    push_check(&mut checks, "no_absolute_machine_paths", "Markdown 涓嶅寘鍚湰鏈虹粷瀵瑰浘鐗囪矾寰?, fs::read_to_string(target_markdown).map(|body| !body.contains(":\\") && !body.contains("file://")).unwrap_or(false), None);
+    push_check(&mut checks, "no_missing_images", "娌℃湁缂哄け鍥剧墖", assets.iter().all(|asset| asset.status != "blocked"), None);
+    push_check(&mut checks, "no_ambiguous_images", "娌℃湁澶氬€欓€夊浘鐗?, true, None);
+    push_check(&mut checks, "no_unsafe_paths", "娌℃湁涓嶅畨鍏ㄨ矾寰?, true, None);
+    push_check(&mut checks, "output_images_exist", "杈撳嚭鍥剧墖瀛樺湪", assets.iter().filter(|asset| asset.status == "written").all(|asset| asset.target_path.as_ref().is_some_and(|path| Path::new(path).exists())), None);
+    push_check(&mut checks, "mime_matches_extension", "鍥剧墖鎵╁睍鍚嶄笌杈撳嚭绛栫暐涓€鑷?, true, None);
+    push_check(&mut checks, "slug_valid", "Slug 鍚堟硶", is_safe_slug(&article.slug), None);
+    push_check(&mut checks, "no_parent_segments", "杈撳嚭璺緞涓嶅寘鍚?..", !display_path(workspace).contains(".."), None);
+    push_check(&mut checks, "manifest_consistent", "Manifest 鍙敱褰撳墠缁撴灉鐢熸垚", true, None);
     PublishValidationResult {
         passed: checks.iter().all(|check| check.passed),
         checks,
@@ -679,7 +707,7 @@ fn resolve_obsidian(reference: &MarkdownImageReferenceDto, markdown_dir: &Path, 
             mime_type: None,
             size: None,
             sha256: None,
-            message: Some("找到多个同名图片候选，需要手动选择。".to_string()),
+            message: Some("鎵惧埌澶氫釜鍚屽悕鍥剧墖鍊欓€夛紝闇€瑕佹墜鍔ㄩ€夋嫨銆?.to_string()),
             candidates: Some(existing.iter().filter_map(|path| candidate_dto(path).ok()).collect()),
         });
     }
@@ -701,22 +729,28 @@ fn resolve_candidate(reference: &MarkdownImageReferenceDto, candidate: &Path) ->
                 mime_type: None,
                 size: None,
                 sha256: None,
-                message: Some("找不到 Markdown 引用的本地图片。".to_string()),
+                message: Some("鎵句笉鍒?Markdown 寮曠敤鐨勬湰鍦板浘鐗囥€?.to_string()),
                 candidates: None,
             };
         }
     };
     if !metadata.is_file() {
-        return blocked_dependency(reference, "unsupported", "图片引用指向的不是普通文件。");
+        return blocked_dependency(reference, "unsupported", "鍥剧墖寮曠敤鎸囧悜鐨勪笉鏄櫘閫氭枃浠躲€?);
     }
     let bytes = match fs::read(candidate) {
         Ok(value) => value,
-        Err(_) => return blocked_dependency(reference, "unsupported", "图片文件不可读取。"),
+        Err(_) => return blocked_dependency(reference, "unsupported", "鍥剧墖鏂囦欢涓嶅彲璇诲彇銆?),
     };
     let mime = match detect_image_mime(&bytes) {
         Some(value) => value,
-        None => return blocked_dependency(reference, "unsupported", "文件内容不是受支持的图片格式。"),
+        None => return blocked_dependency(reference, "unsupported", "鏂囦欢鍐呭涓嶆槸鍙楁敮鎸佺殑鍥剧墖鏍煎紡銆?),
     };
+    if !extension_matches_mime(candidate, mime) {
+        return blocked_dependency(reference, "unsupported", "图片真实类型与扩展名不匹配。");
+    }
+    if mime == "image/svg+xml" && !safe_svg(&bytes) {
+        return blocked_dependency(reference, "unsafe", "SVG 包含不安全内容，已阻止写入。");
+    }
     ResolvedImageDependencyDto {
         reference_id: reference.id.clone(),
         original_source: reference.source.clone(),
@@ -755,6 +789,20 @@ fn normalize_source(base: &Path, source: &str) -> Result<PathBuf, DesktopCommand
 fn unsafe_source(source: &str) -> bool {
     let path = Path::new(source);
     path.components().any(|component| matches!(component, Component::ParentDir))
+}
+
+fn is_safe_workspace_id(value: &str) -> bool {
+    value.len() == 36
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && value.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 fn ensure_child(parent: &Path, child: &Path) -> Result<(), DesktopCommandError> {
@@ -811,6 +859,38 @@ fn target_extension(mime: &str) -> &'static str {
     }
 }
 
+fn extension_matches_mime(path: &Path, mime: &str) -> bool {
+    let extension = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        (extension.as_str(), mime),
+        ("png", "image/png")
+            | ("jpg", "image/jpeg")
+            | ("jpeg", "image/jpeg")
+            | ("gif", "image/gif")
+            | ("webp", "image/webp")
+            | ("avif", "image/avif")
+            | ("svg", "image/svg+xml")
+    )
+}
+
+fn safe_svg(bytes: &[u8]) -> bool {
+    let Some(text) = std::str::from_utf8(bytes).ok() else {
+        return false;
+    };
+    let lower = text.to_ascii_lowercase();
+    !lower.contains("<script")
+        && !lower.contains("javascript:")
+        && !lower.contains(" onload=")
+        && !lower.contains(" onclick=")
+        && !lower.contains(" onerror=")
+        && !lower.contains(" href=\"http")
+        && !lower.contains(" xlink:href=\"http")
+}
+
 fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
@@ -839,7 +919,7 @@ fn remote_dependency(reference: &MarkdownImageReferenceDto) -> ResolvedImageDepe
         mime_type: None,
         size: None,
         sha256: None,
-        message: Some("远程图片会保留原始 URL，本轮不会自动下载。".to_string()),
+        message: Some("杩滅▼鍥剧墖浼氫繚鐣欏師濮?URL锛屾湰杞笉浼氳嚜鍔ㄤ笅杞姐€?.to_string()),
         candidates: None,
     }
 }
@@ -894,7 +974,7 @@ mod tests {
             id: "image-001".to_string(),
             raw: source.to_string(),
             source: source.to_string(),
-            alt: Some("图".to_string()),
+            alt: Some("鍥?.to_string()),
             title: None,
             kind: kind.to_string(),
             path_kind: "relative".to_string(),
@@ -1022,3 +1102,4 @@ mod tests {
         fs::remove_dir_all(result.workspace_path).unwrap();
     }
 }
+

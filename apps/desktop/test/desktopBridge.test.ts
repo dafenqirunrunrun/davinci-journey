@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createBrowserBridge, desktopErrorMessage, isCancelError } from "../src/desktopBridge";
+import { createBrowserBridge, createTauriBridge, desktopErrorMessage, isCancelError } from "../src/desktopBridge";
 
 function markdownFile(content = "# LangGraph\n\n![图](./a.png)") {
   return new File([content], "note.md", { type: "text/markdown", lastModified: Date.UTC(2026, 6, 30) });
@@ -24,7 +24,7 @@ describe("DesktopBridge", () => {
   });
 
   it("maps error codes to Chinese messages", () => {
-    expect(desktopErrorMessage({ code: "IMAGE_NOT_FOUND", message: "" })).toContain("找不到");
+    expect(desktopErrorMessage({ code: "IMAGE_NOT_FOUND", message: "", recoverable: true })).toContain("找不到");
   });
 
   it("browser fallback marks local images as missing", async () => {
@@ -60,6 +60,15 @@ describe("DesktopBridge", () => {
         pendingArchiveProfiles: []
       })
     ).rejects.toMatchObject({ code: "WORKSPACE_CREATE_FAILED" });
+  });
+
+  it("uses the stable Tauri reveal_publish_workspace command", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const bridge = createTauriBridge();
+    await bridge.revealPublishWorkspace("C:/tmp/workspace");
+    expect(invoke).toHaveBeenCalledWith("reveal_publish_workspace", { path: "C:/tmp/workspace" });
+    vi.doUnmock("@tauri-apps/api/core");
   });
 
   it("reload markdown updates draft source through new selection", async () => {
