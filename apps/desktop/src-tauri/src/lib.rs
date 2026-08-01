@@ -47,6 +47,7 @@ pub enum DesktopCommandError {
     GitOperationInProgress,
     GitDetachedHead,
     GitIndexNotClean,
+    PublishSourcePathMissing,
     GitUnrelatedStagedFiles,
     GitTargetHasUncommittedChanges,
     GitHeadChanged,
@@ -85,6 +86,7 @@ impl DesktopCommandError {
             Self::WorkspaceCreateFailed => "WORKSPACE_CREATE_FAILED",
             Self::WorkspaceWriteFailed => "WORKSPACE_WRITE_FAILED",
             Self::WorkspaceValidationFailed => "WORKSPACE_VALIDATION_FAILED",
+            Self::PublishSourcePathMissing => "PUBLISH_SOURCE_PATH_MISSING",
             Self::GitRepositoryNotFound => "GIT_REPOSITORY_NOT_FOUND",
             Self::GitOperationInProgress => "GIT_OPERATION_IN_PROGRESS",
             Self::GitDetachedHead => "GIT_DETACHED_HEAD",
@@ -128,6 +130,9 @@ impl DesktopCommandError {
             Self::WorkspaceWriteFailed => "写入临时发布工作区失败。",
             Self::WorkspaceValidationFailed => "临时发布工作区校验失败。",
             Self::GitRepositoryNotFound => "当前目录不在 Git 仓库中，请在 Git 仓库中运行。",
+            Self::PublishSourcePathMissing => {
+                "无法验证源 Markdown。当前发布草稿缺少源文件路径，请重新选择 Markdown 并生成发布工作区。"
+            }
             Self::GitOperationInProgress => {
                 "Git 操作正在进行中（Merge/Rebase/Cherry-pick/Bisect），请先完成或取消。"
             }
@@ -163,6 +168,7 @@ impl DesktopCommandError {
                 | Self::UnsafeSvg
                 | Self::RepositoryPathUnsafe
                 | Self::TargetPathOutsideAllowedRoot
+                | Self::PublishSourcePathMissing
         )
     }
 }
@@ -444,7 +450,16 @@ fn reveal_publish_workspace(path: String) -> CommandResult<()> {
     Ok(())
 }
 
-// ─── New Repository Publish Commands ─────────────────────────────────────────
+#[tauri::command]
+fn resolve_repository_root_command(
+    request: String,
+) -> CommandResult<security::repository_guard::RepositoryRootResult> {
+    Ok(security::repository_guard::resolve_repository_root(
+        &request,
+    ))
+}
+
+// ─── Repository Publish Commands ────────────────────────────────────────────
 
 #[tauri::command]
 fn inspect_repository_publish(
@@ -528,6 +543,7 @@ pub fn run() {
             generate_publish_workspace,
             discard_publish_workspace,
             reveal_publish_workspace,
+            resolve_repository_root_command,
             inspect_repository_publish,
             apply_publish_workspace_command,
             get_publish_diff_command,

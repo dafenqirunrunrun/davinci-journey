@@ -12,7 +12,7 @@ import {
 } from "@davinci-journey/classification";
 import { parseMarkdown } from "@davinci-journey/markdown-core";
 import { initialArchiveProfiles } from "../archiveProfiles";
-import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type SelectedMarkdownFileDto } from "../desktopBridge";
+import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
 
 const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览并发布", "写入仓库"];
@@ -118,6 +118,7 @@ export function PublishFlow() {
   const [form, setForm] = useState<NewArchiveProfileInput>(emptyForm);
   const [search, setSearch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
+  const [repoRoot, setRepoRoot] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingFilePicker = useRef<((file?: File) => void) | undefined>();
 
@@ -245,31 +246,68 @@ export function PublishFlow() {
 
   // ─── Repository Publish Operations ─────────────────────────────────────────
 
+  async function resolveRepoRoot(workspaceId: string): Promise<string> {
+    // Try to resolve from the source markdown directory (up to 4 levels up)
+    const srcPath = draft.source.markdownFile?.absolutePath;
+    if (srcPath) {
+      const dir = srcPath.split("/").slice(0, -1).join("/");
+      const result = await bridge.resolveRepositoryRoot(dir);
+      if (result.valid) {
+        setRepoRoot(result.repositoryRoot);
+        setDraft((current) => ({
+          ...current,
+          repository: { ...current.repository, repositoryRootResult: result }
+        }));
+        return result.repositoryRoot;
+      }
+    }
+    // Fallback: use empty (Rust will reject as invalid)
+    return "";
+  }
+
   async function inspectRepo() {
     const workspaceId = draft.preview.workspaceResult?.workspaceId;
     if (!workspaceId) return;
     setDraft((current) => ({ ...current, status: "checking_repo", error: undefined }));
     try {
+      const root = await resolveRepoRoot(workspaceId);
+      if (!root) {
+        setDraft((current) => ({
+          ...current,
+          status: "precheck_failed",
+          error: "无法确定目标仓库根目录。请确认所选 Markdown 位于 Git 仓库中。",
+          repository: { ...current.repository, failedStage: "precheck" }
+        }));
+        return;
+      }
       const preCheck = await bridge.inspectRepositoryPublish({
-        repositoryRoot: "",
+        repositoryRoot: root,
         workspaceId
       });
       setDraft((current) => ({
         ...current,
         status: "confirm_write",
-        repository: { ...current.repository, preCheckResult: preCheck }
+        repository: { ...current.repository, preCheckResult: preCheck, failedStage: undefined }
       }));
     } catch (error) {
-      setDraft((current) => ({ ...current, status: "workspace_ready", error: desktopErrorMessage(error) }));
+      setDraft((current) => ({ ...current, status: "precheck_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "precheck" } }));
     }
+  }
+
+  async function recheckRepo() {
+    await inspectRepo();
   }
 
   async function applyWorkspace() {
     if (!draft.preview.workspaceResult) return;
+    if (!repoRoot) {
+      setDraft((current) => ({ ...current, status: "write_failed", error: "尚未解析仓库根目录，请先重新预检。", repository: { ...current.repository, failedStage: "write" } }));
+      return;
+    }
     setDraft((current) => ({ ...current, status: "writing", error: undefined }));
     try {
       const result = await bridge.applyPublishWorkspace({
-        repositoryRoot: "",
+        repositoryRoot: repoRoot,
         workspaceId: draft.preview.workspaceResult.workspaceId,
         operation: draft.repository.preCheckResult?.targetConflicts.targetExists ? "update" : "create",
         archiveProfileChanges: draft.archive.pendingProfileChanges
@@ -287,14 +325,14 @@ export function PublishFlow() {
       setDraft((current) => ({
         ...current,
         status: "written",
-        repository: { ...current.repository, applyResult: result, transactionId: result.transactionId }
+        repository: { ...current.repository, applyResult: result, transactionId: result.transactionId, failedStage: undefined }
       }));
       // Generate default commit message
       const slug = draft.article.slug;
       const topic = selectedProfile?.topic?.toLowerCase() ?? "note";
       setCommitMessage(`docs(${topic}): add ${slug} with assets`);
     } catch (error) {
-      setDraft((current) => ({ ...current, status: "failed", error: desktopErrorMessage(error) }));
+      setDraft((current) => ({ ...current, status: "write_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "write" } }));
     }
   }
 
@@ -305,7 +343,7 @@ export function PublishFlow() {
     try {
       const paths = draft.repository.applyResult?.plannedChanges.map((c) => c.path) ?? [];
       const diffResult = await bridge.getPublishDiff({
-        repositoryRoot: "",
+        repositoryRoot: repoRoot,
         paths
       });
       setDraft((current) => ({
@@ -324,14 +362,14 @@ export function PublishFlow() {
     setDraft((current) => ({ ...current, status: "staging", error: undefined }));
     try {
       const stageResult = await bridge.stagePublishTransaction({
-        repositoryRoot: "",
+        repositoryRoot: repoRoot,
         transactionId: txId
       });
       if (!stageResult.canCommit) {
         setDraft((current) => ({
           ...current,
-          status: "written",
-          repository: { ...current.repository, stageResult },
+          status: "stage_failed",
+          repository: { ...current.repository, stageResult, failedStage: "stage" },
           error: stageResult.message ?? "暂存失败"
         }));
         return;
@@ -339,10 +377,10 @@ export function PublishFlow() {
       setDraft((current) => ({
         ...current,
         status: "confirm_commit",
-        repository: { ...current.repository, stageResult }
+        repository: { ...current.repository, stageResult, failedStage: undefined }
       }));
     } catch (error) {
-      setDraft((current) => ({ ...current, status: "written", error: desktopErrorMessage(error) }));
+      setDraft((current) => ({ ...current, status: "stage_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "stage" } }));
     }
   }
 
@@ -352,17 +390,17 @@ export function PublishFlow() {
     setDraft((current) => ({ ...current, status: "confirm_commit", error: undefined }));
     try {
       const commitResult = await bridge.commitPublishTransaction({
-        repositoryRoot: "",
+        repositoryRoot: repoRoot,
         transactionId: txId,
         message: commitMessage.trim()
       });
       setDraft((current) => ({
         ...current,
         status: "committed",
-        repository: { ...current.repository, commitResult }
+        repository: { ...current.repository, commitResult, failedStage: undefined }
       }));
     } catch (error) {
-      setDraft((current) => ({ ...current, status: "confirm_commit", error: desktopErrorMessage(error) }));
+      setDraft((current) => ({ ...current, status: "commit_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "commit" } }));
     }
   }
 
@@ -372,7 +410,7 @@ export function PublishFlow() {
     setDraft((current) => ({ ...current, status: "rolling_back", error: undefined }));
     try {
       await bridge.rollbackRepositoryPublish({
-        repositoryRoot: "",
+        repositoryRoot: repoRoot,
         transactionId: txId
       });
       setDraft((current) => updatePreview({
@@ -570,9 +608,19 @@ export function PublishFlow() {
             </div>
           )}
 
+          {draft.status === "precheck_failed" && (
+            <FailureState
+              title="预检失败"
+              error={draft.error ?? "预检失败"}
+              onRetry={() => void recheckRepo()}
+              onBack={() => setStep(5)}
+            />
+          )}
+
           {draft.status === "confirm_write" && draft.repository.preCheckResult && (
             <PreCheckResult
               preCheck={draft.repository.preCheckResult}
+              repoRootInfo={draft.repository.repositoryRootResult}
               plannedChanges={draft.preview.workspacePlan?.plannedFiles ?? []}
               pendingProfiles={draft.archive.pendingProfileChanges}
               onConfirm={() => void applyWorkspace()}
@@ -585,6 +633,15 @@ export function PublishFlow() {
             <div className="status-message">
               <p>正在写入正式仓库...</p>
             </div>
+          )}
+
+          {draft.status === "write_failed" && (
+            <FailureState
+              title="写入失败"
+              error={draft.error ?? "写入正式仓库失败"}
+              onRetry={() => void applyWorkspace()}
+              onBack={() => setStep(5)}
+            />
           )}
 
           {draft.status === "written" && draft.repository.applyResult && (
@@ -611,6 +668,15 @@ export function PublishFlow() {
             </div>
           )}
 
+          {draft.status === "stage_failed" && (
+            <StageConflictState
+              stageResult={draft.repository.stageResult}
+              error={draft.error ?? "暂存失败"}
+              onRecheck={() => void recheckRepo()}
+              onRetryStage={() => void stageTransaction()}
+            />
+          )}
+
           {draft.status === "confirm_commit" && (
             <CommitView
               message={commitMessage}
@@ -619,6 +685,15 @@ export function PublishFlow() {
               onCommit={() => void doCommit()}
               onBack={() => setDraft((current) => ({ ...current, status: "written" }))}
               error={draft.error}
+            />
+          )}
+
+          {draft.status === "commit_failed" && (
+            <FailureState
+              title="提交失败"
+              error={draft.error ?? "创建本地 Commit 失败"}
+              onRetry={() => void doCommit()}
+              onBack={() => setDraft((current) => ({ ...current, status: "written" }))}
             />
           )}
 
@@ -634,7 +709,7 @@ export function PublishFlow() {
             </div>
           )}
 
-          {draft.error && draft.status !== "written" && draft.status !== "confirm_commit" && (
+          {draft.error && draft.status !== "written" && draft.status !== "confirm_commit" && draft.status !== "precheck_failed" && draft.status !== "write_failed" && draft.status !== "stage_failed" && draft.status !== "commit_failed" && (
             <p className="error-message">{draft.error}</p>
           )}
         </div>
@@ -645,8 +720,9 @@ export function PublishFlow() {
 
 // ─── Sub-Components ─────────────────────────────────────────────────────────
 
-function PreCheckResult({ preCheck, plannedChanges, pendingProfiles, onConfirm, onBack, onDiscard }: {
+function PreCheckResult({ preCheck, repoRootInfo, plannedChanges, pendingProfiles, onConfirm, onBack, onDiscard }: {
   preCheck: PrePublishCheckResult;
+  repoRootInfo?: RepositoryRootResult;
   plannedChanges: { type: string; path: string }[];
   pendingProfiles: ArchiveProfileChange[];
   onConfirm: () => void;
@@ -656,13 +732,24 @@ function PreCheckResult({ preCheck, plannedChanges, pendingProfiles, onConfirm, 
   const canWrite = preCheck.gitStatus.safeToPublish
     && preCheck.workspaceStatus.passed
     && preCheck.sourceFingerprintStatus.sourceUnchanged
-    && preCheck.targetConflicts.canProceed;
+    && preCheck.targetConflicts.canProceed
+    && Boolean(repoRootInfo?.valid);
 
   const createProfiles = pendingProfiles.filter((c): c is Extract<ArchiveProfileChange, { type: "create" }> => c.type === "create");
 
   return (
     <div className="confirm-write">
       <h3>正式写入确认</h3>
+
+      <section className="write-section">
+        <h4>目标仓库</h4>
+        <code>{repoRootInfo?.repositoryRoot || preCheck.gitStatus.repositoryRoot || "未解析"}</code>
+        <div className="status-grid">
+          <span>当前分支：{repoRootInfo?.branch ?? preCheck.gitStatus.branch ?? "（无）"}</span>
+          <span>当前 HEAD：{(repoRootInfo?.head ?? preCheck.gitStatus.head).slice(0, 7)}</span>
+        </div>
+        {!repoRootInfo?.valid && <p className="error-message">仓库根目录无效，无法确认写入。</p>}
+      </section>
 
       <section className="write-section">
         <h4>Git 状态</h4>
@@ -882,6 +969,68 @@ function CommitResultView({ result }: {
       <button className="secondary-button" type="button" disabled title="推送到 GitHub（下一阶段）">
         推送到 GitHub（下一阶段）
       </button>
+    </div>
+  );
+}
+
+function FailureState({ title, error, onRetry, onBack }: {
+  title: string;
+  error: string;
+  onRetry: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="failure-state">
+      <h3>{title}</h3>
+      <p className="error-message">{error}</p>
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onBack}>
+          返回
+        </button>
+        <button className="primary-button" type="button" onClick={onRetry}>
+          重试
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function StageConflictState({ stageResult, error, onRecheck, onRetryStage }: {
+  stageResult?: StageTransactionResult;
+  error: string;
+  onRecheck: () => void;
+  onRetryStage: () => void;
+}) {
+  const unrelated = stageResult?.hasUnrelatedStaged ? stageResult.unrelatedFiles : [];
+  return (
+    <div className="failure-state">
+      <h3>暂存冲突</h3>
+      <p className="error-message">{error}</p>
+
+      {unrelated.length > 0 && (
+        <div className="write-section">
+          <h4>无关文件</h4>
+          {unrelated.map((f, i) => <code key={i}>{f}</code>)}
+        </div>
+      )}
+
+      <p className="warning-text">
+        暂存区中存在与本次发布无关的文件。
+        <br />
+        为了避免把其他修改一起提交，本次自动提交已停止。
+        <br />
+        请在终端或 VS Code 的源代码管理面板中处理现有暂存文件，
+        处理完成后点击“重新检查 Git 状态”。
+      </p>
+
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onRecheck}>
+          重新检查 Git 状态
+        </button>
+        <button className="primary-button" type="button" onClick={onRetryStage}>
+          重试暂存
+        </button>
+      </div>
     </div>
   );
 }

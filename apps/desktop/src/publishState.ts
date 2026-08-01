@@ -1,6 +1,6 @@
 import type { ArchiveProfileChange } from "@davinci-journey/classification";
 import type { ParsedMarkdownDocument } from "@davinci-journey/markdown-core";
-import type { ApplyWorkspaceResult, CommitTransactionResult, GeneratePublishWorkspaceResult, PrePublishCheckResult, StageTransactionResult } from "./desktopBridge";
+import type { ApplyWorkspaceResult, CommitTransactionResult, GeneratePublishWorkspaceResult, PrePublishCheckResult, RepositoryRootResult, StageTransactionResult } from "./desktopBridge";
 
 export interface SelectedMarkdownFile {
   absolutePath: string;
@@ -46,15 +46,37 @@ export interface PublishWorkspacePlan {
 
 export type PlannedFileChange = { type: "create"; path: string; source?: string } | { type: "update"; path: string } | { type: "delete"; path: string };
 
-export type PublishStatus = "selecting" | "parsing" | "needs_attention" | "ready" | "generating_workspace" | "workspace_ready" | "checking_repo" | "confirm_write" | "writing" | "written" | "viewing_diff" | "staging" | "confirm_commit" | "committed" | "rolling_back" | "failed";
+export type PublishStatus =
+  | "selecting"
+  | "parsing"
+  | "needs_attention"
+  | "ready"
+  | "generating_workspace"
+  | "workspace_ready"
+  | "checking_repo"
+  | "confirm_write"
+  | "precheck_failed"
+  | "writing"
+  | "write_failed"
+  | "written"
+  | "viewing_diff"
+  | "staging"
+  | "stage_failed"
+  | "confirm_commit"
+  | "commit_failed"
+  | "committed"
+  | "rolling_back"
+  | "failed";
 
 export interface RepositoryPublishState {
+  repositoryRootResult?: RepositoryRootResult;
   preCheckResult?: PrePublishCheckResult;
   applyResult?: ApplyWorkspaceResult;
   stageResult?: StageTransactionResult;
   commitResult?: CommitTransactionResult;
   diffResult?: string;
   transactionId?: string;
+  failedStage?: string;
 }
 
 export interface PublishDraft {

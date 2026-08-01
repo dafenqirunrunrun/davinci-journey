@@ -147,6 +147,75 @@ pub fn inspect_repository(repo_root: &Path) -> Result<GitRepositoryStatus, Strin
     })
 }
 
+/// Resolve the repository root from a starting directory, returning a structured result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepositoryRootResult {
+    pub repository_root: String,
+    pub branch: Option<String>,
+    pub head: String,
+    pub valid: bool,
+    pub message: Option<String>,
+}
+
+/// Resolve and validate a repository root from a candidate path.
+/// Returns a structured result suitable for IPC.
+pub fn resolve_repository_root(candidate: &str) -> RepositoryRootResult {
+    let path = PathBuf::from(candidate);
+
+    if candidate.trim().is_empty() {
+        return RepositoryRootResult {
+            repository_root: String::new(),
+            branch: None,
+            head: String::new(),
+            valid: false,
+            message: Some(
+                "未指定仓库根目录。请选择 Markdown 文件所在 Git 仓库的根目录。".to_string(),
+            ),
+        };
+    }
+
+    if !path.exists() {
+        return RepositoryRootResult {
+            repository_root: candidate.to_string(),
+            branch: None,
+            head: String::new(),
+            valid: false,
+            message: Some(format!("目录不存在：{}", candidate)),
+        };
+    }
+
+    if !path.is_dir() {
+        return RepositoryRootResult {
+            repository_root: candidate.to_string(),
+            branch: None,
+            head: String::new(),
+            valid: false,
+            message: Some(format!("路径不是目录：{}", candidate)),
+        };
+    }
+
+    match find_repository_root(&path) {
+        Ok(root) => {
+            let branch = current_branch(&root).ok().flatten();
+            let head = resolve_head(&root).unwrap_or_default();
+            RepositoryRootResult {
+                repository_root: root.to_string_lossy().replace('\\', "/"),
+                branch,
+                head,
+                valid: true,
+                message: None,
+            }
+        }
+        Err(e) => RepositoryRootResult {
+            repository_root: candidate.to_string(),
+            branch: None,
+            head: String::new(),
+            valid: false,
+            message: Some(e),
+        },
+    }
+}
+
 /// Check that HEAD has not changed since we last inspected. Used before commit.
 pub fn verify_head_unchanged(repo_root: &Path, expected_head: &str) -> Result<(), String> {
     let current = resolve_head(repo_root)?;

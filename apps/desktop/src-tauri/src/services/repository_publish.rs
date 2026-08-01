@@ -522,6 +522,23 @@ pub fn apply_publish_workspace(
     let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
         .map_err(|_| "manifest.json 格式无效".to_string())?;
 
+    // Verify source markdown path is present
+    let source_path = manifest["source_markdown_path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if source_path.is_empty() {
+        return Err(
+            "发布草稿缺少源 Markdown 路径，请重新选择 Markdown 并生成发布工作区。".to_string(),
+        );
+    }
+    if !Path::new(&source_path).exists() {
+        return Err(format!(
+            "源 Markdown 文件不存在：{}。请重新选择 Markdown 并生成发布工作区。",
+            source_path
+        ));
+    }
+
     // Verify source files haven't changed
     let fingerprint_status = check_source_fingerprints(&workspace_root)?;
     if !fingerprint_status.source_unchanged {
@@ -562,11 +579,28 @@ pub fn apply_publish_workspace(
                 // Normalize to repo-relative path
                 let rel_path = workspace_relative_path(&workspace_root, target_path);
                 if let Ok(rp) = rel_path {
+                    // Compute the output file's SHA from the workspace file,
+                    // NOT the manifest's source fingerprint (which tracks source
+                    // change detection separately).
+                    let workspace_file = workspace_root.join(&rp);
+                    let output_sha = if workspace_file.exists() {
+                        match fs::read(&workspace_file) {
+                            Ok(bytes) => sha256_hex(&bytes),
+                            Err(_) => String::new(),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let operation = if repo_root.join(&rp).exists() {
+                        FileOperation::Update
+                    } else {
+                        FileOperation::Create
+                    };
                     planned_changes.push(RepositoryFileChange {
                         relative_path: rp,
-                        operation: FileOperation::Create,
-                        size: asset["size"].as_u64().unwrap_or(0),
-                        sha256: asset["sha256"].as_str().unwrap_or("").to_string(),
+                        operation,
+                        size: fs::metadata(&workspace_file).map(|m| m.len()).unwrap_or(0),
+                        sha256: output_sha,
                     });
                 }
             }

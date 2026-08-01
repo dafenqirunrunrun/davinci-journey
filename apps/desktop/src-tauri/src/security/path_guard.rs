@@ -68,7 +68,11 @@ pub fn is_symlink(path: &Path) -> bool {
 }
 
 /// Allowed root directories for writing content into the repository.
-pub const ALLOWED_CONTENT_ROOTS: &[&str] = &["content/", "public/assets/notes/", "config/"];
+pub const ALLOWED_CONTENT_ROOTS: &[&str] = &[
+    "content/",
+    "public/assets/notes/",
+    "config/archive-profiles.yml",
+];
 
 /// Verify that a relative target path falls inside one of the allowed roots.
 /// Returns `Ok(())` if the path is safe, or an error explanation.
@@ -88,10 +92,33 @@ pub fn verify_allowed_target(relative_path: &Path) -> Result<(), String> {
         return Err(format!("不允许使用绝对目标路径：{}", normal_str));
     }
 
+    // Check for Windows drive letter prefix (e.g., C:, D:)
+    if normal_str.len() >= 2 && normal_str.as_bytes()[1] == b':' {
+        return Err(format!("路径包含盘符，可能是越界访问：{}", normal_str));
+    }
+
+    // Check for UNC paths (starts with // or \\)
+    if normal_str.starts_with("//") || normal_str.starts_with("\\\\") {
+        return Err(format!("路径包含 UNC 前缀，已阻止：{}", normal_str));
+    }
+
     for root in ALLOWED_CONTENT_ROOTS {
         let root_norm = root.replace('\\', "/");
-        if normal_str.starts_with(&root_norm) || normal_str == root_norm.trim_end_matches('/') {
+        let root_trimmed = root_norm.trim_end_matches('/');
+
+        // Exact match for file targets (like config/archive-profiles.yml)
+        if normal_str == root_trimmed {
             return Ok(());
+        }
+
+        // Component-level directory match: normal path must start with root,
+        // and the character after root must be '/' or end of string.
+        // Prevents "content-note/" matching "content/", and prevents
+        // "config/archive-profiles.yml.bak" matching the exact file target.
+        if let Some(after_root) = normal_str.strip_prefix(root_trimmed) {
+            if after_root.is_empty() || after_root.starts_with('/') {
+                return Ok(());
+            }
         }
     }
 
@@ -161,6 +188,39 @@ mod tests {
         assert!(verify_allowed_target(Path::new(".git/config")).is_err());
     }
 
+    #[test]
+    fn rejects_prefix_spoofing() {
+        // "content-note" should NOT match root "content/"
+        assert!(verify_allowed_target(Path::new("content-extra/file.md")).is_err());
+        assert!(verify_allowed_target(Path::new("content2/file.md")).is_err());
+        assert!(verify_allowed_target(Path::new("contents/file.md")).is_err());
+    }
+
+    #[test]
+    fn accepts_legitimate_content_paths() {
+        assert!(verify_allowed_target(Path::new("content/ai-agent/note.md")).is_ok());
+        assert!(verify_allowed_target(Path::new("content/note.md")).is_ok());
+        assert!(verify_allowed_target(Path::new("public/assets/notes/slug/image.webp")).is_ok());
+        assert!(verify_allowed_target(Path::new("config/archive-profiles.yml")).is_ok());
+    }
+
+    #[test]
+    fn rejects_drive_letter() {
+        assert!(verify_allowed_target(Path::new("C:content/note.md")).is_err());
+        assert!(verify_allowed_target(Path::new("D:/notes.md")).is_err());
+    }
+
+    #[test]
+    fn rejects_unc_path() {
+        assert!(verify_allowed_target(Path::new("//server/share/file.md")).is_err());
+    }
+
+    #[test]
+    fn config_exact_match_only() {
+        // Only exact config/archive-profiles.yml is allowed
+        assert!(verify_allowed_target(Path::new("config/other.yml")).is_err());
+        assert!(verify_allowed_target(Path::new("config/note.md")).is_err());
+    }
     #[test]
     fn traversal_rejected() {
         assert!(verify_allowed_target(Path::new("content/../../.git/config")).is_err());

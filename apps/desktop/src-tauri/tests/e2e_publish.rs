@@ -99,16 +99,29 @@ fn e2e_full_publish_workflow() {
     let md_path = ws_content.join("e2e-test-article.md");
     fs::write(&md_path, md_content).unwrap();
 
+    // Create real source markdown file (so source_markdown_path is valid)
+    let source_md = dir.path().join("sources/source-note.md");
+    fs::create_dir_all(dir.path().join("sources")).unwrap();
+    let src_content =
+        "---\ntitle: E2E Test Article\nslug: e2e-test-article\n---\n\n# E2E Test\n\nTest content.";
+    fs::write(&source_md, src_content).unwrap();
+    let src_fingerprint = {
+        use sha2::Digest;
+        let bytes = fs::read(&source_md).unwrap();
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+    let source_md_str = source_md.to_string_lossy().to_string();
+
     // Write workspace manifest
     let manifest = serde_json::json!({
         "version": 1,
         "workspace_id": ws_id,
         "created_at": "2026-07-30T10:00:00Z",
-        "source_markdown_path": "",
+        "source_markdown_path": source_md_str,
         "target_markdown_path": "content/ai-agent/langgraph/e2e-test-article.md",
         "target_asset_directory": "public/assets/notes/e2e-test-article",
         "archive_profile_id": "ai-agent-langgraph",
-        "source_fingerprint": "",
+        "source_fingerprint": src_fingerprint,
         "planned_changes": [
             "content/ai-agent/langgraph/e2e-test-article.md",
             "public/assets/notes/e2e-test-article"
@@ -130,6 +143,12 @@ fn e2e_full_publish_workflow() {
             archive_profile_changes: vec![],
         },
     );
+    if let Err(ref e) = result {
+        // Print some debug info
+        let manifest_rt = fs::read_to_string(ws_root.join("manifest.json")).unwrap();
+        println!("Error: {}", e);
+        println!("Manifest content: {}", manifest_rt);
+    }
     assert!(result.is_ok(), "Should apply workspace: {:?}", result.err());
     let apply = result.unwrap();
 
@@ -197,15 +216,25 @@ fn e2e_rollback_test() {
     let md_path = ws_content.join("rollback-test.md");
     fs::write(&md_path, md_content).unwrap();
 
+    // Create real source file
+    let rollback_source = dir.path().join("sources/rollback-note.md");
+    fs::create_dir_all(dir.path().join("sources")).unwrap();
+    fs::write(&rollback_source, "# Rollback Source").unwrap();
+    let rb_fingerprint = {
+        use sha2::Digest;
+        let bytes = fs::read(&rollback_source).unwrap();
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
     let manifest = serde_json::json!({
         "version": 1,
         "workspace_id": ws_id,
         "created_at": "2026-07-30T10:00:00Z",
-        "source_markdown_path": "",
+        "source_markdown_path": rollback_source.to_string_lossy().to_string(),
         "target_markdown_path": "content/ai-agent/langgraph/rollback-test.md",
         "target_asset_directory": "public/assets/notes/rollback-test",
         "archive_profile_id": "ai-agent-langgraph",
-        "source_fingerprint": "",
+        "source_fingerprint": rb_fingerprint,
         "planned_changes": [],
         "assets": []
     });

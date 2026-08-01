@@ -254,6 +254,14 @@ export interface CommitTransactionResult {
   committedFiles: string[];
 }
 
+export interface RepositoryRootResult {
+  repositoryRoot: string;
+  branch?: string;
+  head: string;
+  valid: boolean;
+  message?: string;
+}
+
 export interface RollbackPublishRequest {
   repositoryRoot: string;
   transactionId: string;
@@ -273,6 +281,7 @@ export interface DesktopBridge {
   stagePublishTransaction(request: StageTransactionRequest): Promise<StageTransactionResult>;
   commitPublishTransaction(request: CommitTransactionRequest): Promise<CommitTransactionResult>;
   rollbackRepositoryPublish(request: RollbackPublishRequest): Promise<void>;
+  resolveRepositoryRoot(request: string): Promise<RepositoryRootResult>;
 }
 
 const MAX_MARKDOWN_SIZE = 10 * 1024 * 1024;
@@ -452,6 +461,9 @@ export function createBrowserBridge(filePicker: () => Promise<File | undefined>)
     },
     async rollbackRepositoryPublish() {
       throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持仓库写入操作。");
+    },
+    async resolveRepositoryRoot() {
+      throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持仓库写入操作。");
     }
   };
 }
@@ -469,7 +481,8 @@ export function createTauriBridge(): DesktopBridge {
     getPublishDiff: (request) => invokeTauri("get_publish_diff_command", { request }),
     stagePublishTransaction: (request) => invokeTauri("stage_publish_transaction", { request }),
     commitPublishTransaction: (request) => invokeTauri("commit_publish_transaction", { request }),
-    rollbackRepositoryPublish: (request) => invokeTauri("rollback_repository_publish", { request })
+    rollbackRepositoryPublish: (request) => invokeTauri("rollback_repository_publish", { request }),
+    resolveRepositoryRoot: (request) => invokeTauri("resolve_repository_root_command", { request })
   };
 }
 
