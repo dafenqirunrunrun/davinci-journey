@@ -256,10 +256,20 @@ export interface CommitTransactionResult {
 
 export interface RepositoryRootResult {
   repositoryRoot: string;
+  displayPath: string;
   branch?: string;
   head: string;
   valid: boolean;
   message?: string;
+  errors: string[];
+}
+
+export interface RepositoryTargetSettings {
+  repositoryRoot: string;
+  displayPath: string;
+  branch?: string;
+  head?: string;
+  validatedAt?: string;
 }
 
 export interface RollbackPublishRequest {
@@ -272,7 +282,7 @@ export interface DesktopBridge {
   selectMarkdownFile(request?: SelectMarkdownFileRequest): Promise<SelectedMarkdownFileDto>;
   resolveImageDependencies(request: ResolveImageDependenciesRequest): Promise<ResolvedImageDependencyDto[]>;
   generatePublishWorkspace(request: GeneratePublishWorkspaceRequest): Promise<GeneratePublishWorkspaceResult>;
-  discardPublishWorkspace(workspaceId: string): Promise<void>;
+  discardPublishWorkspace(workspaceId: string, repositoryRoot?: string): Promise<void>;
   revealPublishWorkspace(path: string): Promise<void>;
   // Repository publish commands
   inspectRepositoryPublish(request: PrePublishCheckRequest): Promise<PrePublishCheckResult>;
@@ -282,6 +292,9 @@ export interface DesktopBridge {
   commitPublishTransaction(request: CommitTransactionRequest): Promise<CommitTransactionResult>;
   rollbackRepositoryPublish(request: RollbackPublishRequest): Promise<void>;
   resolveRepositoryRoot(request: string): Promise<RepositoryRootResult>;
+  selectRepositoryRoot(): Promise<RepositoryRootResult>;
+  validateRepositoryRoot(repositoryRoot: string): Promise<RepositoryRootResult>;
+  loadRepositoryTargetSettings(): Promise<RepositoryRootResult | undefined>;
 }
 
 const MAX_MARKDOWN_SIZE = 10 * 1024 * 1024;
@@ -464,6 +477,22 @@ export function createBrowserBridge(filePicker: () => Promise<File | undefined>)
     },
     async resolveRepositoryRoot() {
       throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持仓库写入操作。");
+    },
+    async selectRepositoryRoot() {
+      throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不能选择目标网站仓库，请使用 Tauri 桌面模式。");
+    },
+    async validateRepositoryRoot() {
+      return {
+        repositoryRoot: "",
+        displayPath: "",
+        head: "",
+        valid: false,
+        message: "浏览器预览模式不能验证目标网站仓库。",
+        errors: ["浏览器预览模式不能验证目标网站仓库。"]
+      };
+    },
+    async loadRepositoryTargetSettings() {
+      return undefined;
     }
   };
 }
@@ -474,7 +503,7 @@ export function createTauriBridge(): DesktopBridge {
     selectMarkdownFile: (request) => invokeTauri("select_markdown_file", { request }),
     resolveImageDependencies: (request) => invokeTauri("resolve_image_dependencies", { request }),
     generatePublishWorkspace: (request) => invokeTauri("generate_publish_workspace", { request }),
-    discardPublishWorkspace: (workspaceId) => invokeTauri("discard_publish_workspace", { workspaceId }),
+    discardPublishWorkspace: (workspaceId, repositoryRoot) => invokeTauri("discard_publish_workspace", { workspaceId, repositoryRoot }),
     revealPublishWorkspace: (path) => invokeTauri("reveal_publish_workspace", { path }),
     inspectRepositoryPublish: (request) => invokeTauri("inspect_repository_publish", { request }),
     applyPublishWorkspace: (request) => invokeTauri("apply_publish_workspace_command", { request }),
@@ -482,7 +511,10 @@ export function createTauriBridge(): DesktopBridge {
     stagePublishTransaction: (request) => invokeTauri("stage_publish_transaction", { request }),
     commitPublishTransaction: (request) => invokeTauri("commit_publish_transaction", { request }),
     rollbackRepositoryPublish: (request) => invokeTauri("rollback_repository_publish", { request }),
-    resolveRepositoryRoot: (request) => invokeTauri("resolve_repository_root_command", { request })
+    resolveRepositoryRoot: (request) => invokeTauri("resolve_repository_root_command", { request }),
+    selectRepositoryRoot: () => invokeTauri("select_repository_root"),
+    validateRepositoryRoot: (repositoryRoot) => invokeTauri("validate_repository_root_command", { repositoryRoot }),
+    loadRepositoryTargetSettings: () => invokeTauri("load_repository_target_settings")
   };
 }
 

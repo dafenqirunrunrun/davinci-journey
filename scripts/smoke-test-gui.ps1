@@ -1,111 +1,175 @@
-# 达芬奇的奇妙之旅 — 真实 Tauri GUI Smoke Test
+# Davinci Journey - real Tauri GUI smoke test helper.
 #
-# 用法：
-#   1. 运行本脚本创建隔离测试仓库
-#   2. 手动运行桌面应用完成 GUI 流程
-#   3. 运行本脚本的验证部分确认结果
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File scripts\smoke-test-gui.ps1 -Setup
+#   powershell -ExecutionPolicy Bypass -File scripts\smoke-test-gui.ps1 -Verify -ManifestPath <manifest>
+#   powershell -ExecutionPolicy Bypass -File scripts\smoke-test-gui.ps1 -Cleanup -ManifestPath <manifest>
 #
-# 要求：
-#   - 必须使用 fixtures/publish/valid-note/note.md（含两张真实图片）
-#   - 严禁使用 笔记—7.30.md
+# Setup creates two separated locations:
+#   Source directory: a non-git directory that contains fixture note.md and images.
+#   Target repository: a temporary git repository with the minimal site structure.
 
 param(
-    [switch]$Verify
+    [switch]$Setup,
+    [switch]$Verify,
+    [switch]$Cleanup,
+    [string]$ManifestPath
 )
 
 $ErrorActionPreference = "Stop"
-$projectRoot = "D:\个人笔记管理"
+$projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 
-if (-not $Verify) {
-    # ── 创建隔离测试仓库 ──────────────────────────────────────────────
-    $smokeDir = Join-Path $env:TEMP ("davinci-publish-smoke-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $smokeDir -Force | Out-Null
-    Set-Location $smokeDir
+if (-not $Setup -and -not $Verify -and -not $Cleanup) {
+    $Setup = $true
+}
 
-    git init | Out-Null
-    git config user.name "Davinci Smoke Test"
-    git config user.email "smoke@example.invalid"
+function Get-Sha256([string]$Path) {
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
 
-    # 最小必要结构
-    New-Item -ItemType Directory -Path "content/ai-agent/langgraph" -Force | Out-Null
-    New-Item -ItemType Directory -Path "public/assets/notes" -Force | Out-Null
-    New-Item -ItemType Directory -Path "config" -Force | Out-Null
-    Copy-Item "$projectRoot\config\archive-profiles.yml" "config\"
-    "`# Smoke Test Repo" | Out-File -Encoding utf8 README.md
+function Assert-ExactSmokePath([string]$Path, [string]$Prefix) {
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    $temp = [System.IO.Path]::GetFullPath($env:TEMP)
+    if (-not $resolved.StartsWith($temp, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean non-TEMP path: $resolved"
+    }
+    if ([System.IO.Path]::GetFileName($resolved) -notlike "$Prefix*") {
+        throw "Refusing to clean path not created by this script: $resolved"
+    }
+    return $resolved
+}
 
-    git add README.md config/archive-profiles.yml
-    git commit -m "initial commit" | Out-Null
+function Read-SmokeManifest {
+    if (-not $ManifestPath) {
+        throw "Missing -ManifestPath."
+    }
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "Smoke manifest not found: $ManifestPath"
+    }
+    Get-Content -Raw -Encoding UTF8 -LiteralPath $ManifestPath | ConvertFrom-Json
+}
 
-    Write-Host "════════════════════════════════════════════════════════"
-    Write-Host "  隔离测试仓库已创建：" -ForegroundColor Cyan
-    Write-Host "  $smokeDir" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  请在桌面应用中手动完成以下流程：" -ForegroundColor Cyan
-    Write-Host "  1. 启动应用：pnpm --filter @davinci-journey/desktop tauri:dev"
-    Write-Host "  2. 选择 Markdown：fixtures\publish\valid-note\note.md"
-    Write-Host "  3. 确认解析两张图片（architecture.png、flow.jpg）"
-    Write-Host "  4. 选择归档方案：AI Agent / LangGraph"
-    Write-Host "  5. 生成发布工作区"
-    Write-Host "  6. 点击『写入正式仓库』→ 确认目标仓库为上面路径"
-    Write-Host "  7. 查看 Git Diff → 精确 Stage → 编辑/确认 Commit Message"
-    Write-Host "  8. 确认创建本地 Commit"
-    Write-Host ""
-    Write-Host "  完成后运行：$PSCommandPath -Verify" -ForegroundColor Yellow
-    Write-Host "  （需要先执行：cd $PSCommandPath 所在目录）" -ForegroundColor DarkGray
-    Write-Host "════════════════════════════════════════════════════════"
-    Set-Location $projectRoot
+if ($Setup) {
+    $id = [guid]::NewGuid().ToString("N")
+    $sourceDir = Join-Path $env:TEMP "davinci-smoke-source-$id"
+    $targetRepo = Join-Path $env:TEMP "davinci-smoke-repository-$id"
+    $manifest = Join-Path $env:TEMP "davinci-smoke-manifest-$id.json"
+    $fixture = Join-Path $projectRoot "fixtures\publish\valid-note"
 
-} else {
-    # ── 验证模式 ──────────────────────────────────────────────────────
-    $latest = Get-ChildItem $env:TEMP -Directory -Filter "davinci-publish-smoke-*" |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    New-Item -ItemType Directory -Path $sourceDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $targetRepo -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $fixture "note.md") -Destination $sourceDir
+    Copy-Item -LiteralPath (Join-Path $fixture "images") -Destination $sourceDir -Recurse
 
-    if (-not $latest) {
-        Write-Host "未找到测试仓库。请先运行：$PSCommandPath（不带 -Verify）" -ForegroundColor Red
-        exit 1
+    git -C $targetRepo init | Out-Null
+    git -C $targetRepo config user.name "Davinci Smoke Test"
+    git -C $targetRepo config user.email "smoke@example.invalid"
+
+    New-Item -ItemType Directory -Path (Join-Path $targetRepo "content\ai-agent\langgraph") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $targetRepo "public\assets\notes") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $targetRepo "config") -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $projectRoot "config\archive-profiles.yml") -Destination (Join-Path $targetRepo "config\archive-profiles.yml")
+    "# Smoke Test Repo" | Out-File -Encoding utf8 -LiteralPath (Join-Path $targetRepo "README.md")
+
+    git -C $targetRepo add README.md config/archive-profiles.yml
+    git -C $targetRepo commit -m "initial commit" | Out-Null
+
+    $notePath = Join-Path $sourceDir "note.md"
+    $sourceHashes = [ordered]@{
+        note = Get-Sha256 $notePath
+    }
+    Get-ChildItem -LiteralPath (Join-Path $sourceDir "images") -File | ForEach-Object {
+        $sourceHashes[$_.Name] = Get-Sha256 $_.FullName
     }
 
-    $repo = $latest.FullName
-    Set-Location $repo
+    [ordered]@{
+        id = $id
+        sourceDir = $sourceDir
+        targetRepo = $targetRepo
+        notePath = $notePath
+        sourceHashes = $sourceHashes
+        createdAt = (Get-Date).ToString("o")
+    } | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 -LiteralPath $manifest
 
-    Write-Host "验证仓库：$repo" -ForegroundColor Cyan
+    Write-Host "Source directory:" -ForegroundColor Cyan
+    Write-Host $sourceDir -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "── git status --short ──" -ForegroundColor Cyan
-    git status --short
+    Write-Host "Target repository:" -ForegroundColor Cyan
+    Write-Host $targetRepo -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "── git log -1 --oneline ──" -ForegroundColor Cyan
-    git log -1 --oneline
+    Write-Host "Source Markdown:" -ForegroundColor Cyan
+    Write-Host $notePath -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "── git show --stat --oneline HEAD ──" -ForegroundColor Cyan
-    git show --stat --oneline HEAD
+    Write-Host "Smoke manifest:" -ForegroundColor Cyan
+    Write-Host $manifest -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "── git show --name-only --format= HEAD ──" -ForegroundColor Cyan
-    git show --name-only --format= HEAD
+    Write-Host "GUI flow: select target repo, select note.md, generate workspace, write, diff, stage, commit." -ForegroundColor Cyan
+    exit 0
+}
 
+if ($Verify) {
+    $m = Read-SmokeManifest
+    $sourceDir = [string]$m.sourceDir
+    $targetRepo = [string]$m.targetRepo
+    $notePath = [string]$m.notePath
+
+    Write-Host "Source directory: $sourceDir" -ForegroundColor Cyan
+    Write-Host "Target repository: $targetRepo" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "── 检查要求 ──" -ForegroundColor Cyan
-    $files = git show --name-only --format= HEAD
-    $checks = @(
-        @{ Name = "Markdown 已提交"; Test = ($files -match "\.md$") },
-        @{ Name = "architecture.webp 已提交"; Test = ($files -match "architecture\.webp") },
-        @{ Name = "flow.webp 已提交"; Test = ($files -match "flow\.webp") },
-        @{ Name = "不含 note.md 源文件（相对路径应重写）"; Test = (-not ($files -match "note\.md$")) }
-    )
+    Write-Host "-- target git status --short --" -ForegroundColor Cyan
+    git -C $targetRepo status --short
+    Write-Host ""
+    Write-Host "-- target git log -1 --oneline --" -ForegroundColor Cyan
+    git -C $targetRepo log -1 --oneline
+    Write-Host ""
+    Write-Host "-- target HEAD files --" -ForegroundColor Cyan
+    $files = git -C $targetRepo show --name-only --format= HEAD
+    $files
+
+    $checks = @()
+    $checks += @{ Name = "target commit contains markdown"; Pass = [bool]($files -match "^content/.+\.md$") }
+    $checks += @{ Name = "target commit contains architecture.webp"; Pass = [bool]($files -match "architecture.*\.webp$") }
+    $checks += @{ Name = "target commit contains flow.webp"; Pass = [bool]($files -match "flow.*\.webp$") }
+    $checks += @{ Name = "source directory is not a git repo"; Pass = -not (Test-Path -LiteralPath (Join-Path $sourceDir ".git")) }
+    $checks += @{ Name = "source markdown remains"; Pass = Test-Path -LiteralPath $notePath }
+    $checks += @{ Name = "source directory has no publish workspace"; Pass = -not (Test-Path -LiteralPath (Join-Path $sourceDir ".publish-workspaces")) }
+    $checks += @{ Name = "dev repo has no fixture output"; Pass = -not (Test-Path -LiteralPath (Join-Path $projectRoot "content\ai-agent\langgraph\langgraph-checkpoint.md")) }
+
+    foreach ($key in $m.sourceHashes.PSObject.Properties.Name) {
+        $path = if ($key -eq "note") { $notePath } else { Join-Path (Join-Path $sourceDir "images") $key }
+        $checks += @{ Name = "source hash unchanged: $key"; Pass = ((Get-Sha256 $path) -eq $m.sourceHashes.$key) }
+    }
+
     $allPass = $true
-    foreach ($c in $checks) {
-        if ($c.Test) {
-            Write-Host "  [PASS] $($c.Name)" -ForegroundColor Green
+    foreach ($check in $checks) {
+        if ($check.Pass) {
+            Write-Host "[PASS] $($check.Name)" -ForegroundColor Green
         } else {
-            Write-Host "  [FAIL] $($c.Name)" -ForegroundColor Red
+            Write-Host "[FAIL] $($check.Name)" -ForegroundColor Red
             $allPass = $false
         }
     }
 
-    Set-Location $projectRoot
-    Write-Host ""
-    if ($allPass) {
-        Write-Host "Smoke Test 验证通过。可安全删除测试仓库：Remove-Item -Recurse -Force '$repo'" -ForegroundColor Green
-    } else {
-        Write-Host "Smoke Test 验证失败，请检查提交内容。" -ForegroundColor Red
+    if (-not $allPass) {
+        exit 1
     }
+    exit 0
+}
+
+if ($Cleanup) {
+    $m = Read-SmokeManifest
+    $sourceDir = Assert-ExactSmokePath ([string]$m.sourceDir) "davinci-smoke-source-"
+    $targetRepo = Assert-ExactSmokePath ([string]$m.targetRepo) "davinci-smoke-repository-"
+    $manifest = Assert-ExactSmokePath $ManifestPath "davinci-smoke-manifest-"
+
+    if (Test-Path -LiteralPath $sourceDir) {
+        Remove-Item -LiteralPath $sourceDir -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $targetRepo) {
+        Remove-Item -LiteralPath $targetRepo -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $manifest) {
+        Remove-Item -LiteralPath $manifest -Force
+    }
+    Write-Host "Smoke test paths cleaned." -ForegroundColor Green
 }

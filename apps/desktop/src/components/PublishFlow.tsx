@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   applyArchiveProfileChanges,
   createArchiveProfile,
@@ -118,7 +118,7 @@ export function PublishFlow() {
   const [form, setForm] = useState<NewArchiveProfileInput>(emptyForm);
   const [search, setSearch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
-  const [repoRoot, setRepoRoot] = useState("");
+  const [repositoryTarget, setRepositoryTarget] = useState<RepositoryRootResult | undefined>();
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingFilePicker = useRef<((file?: File) => void) | undefined>();
 
@@ -149,24 +149,43 @@ export function PublishFlow() {
   const frontMatterPreview = selectedProfile && draft.source.markdownFile ? writeArchiveFrontMatter(draft.source.markdownFile.content, draft.article, selectedProfile) : "";
   const filteredProfiles = profiles.filter((profile) => `${profile.name} ${profile.category} ${profile.topic ?? ""}`.toLowerCase().includes(search.toLowerCase()));
   const assetCounts = draft.assets.dependencies.reduce<Record<string, number>>((counts, dependency) => ({ ...counts, [dependency.status]: (counts[dependency.status] ?? 0) + 1 }), {});
+  const repoRoot = repositoryTarget?.valid ? repositoryTarget.repositoryRoot : "";
+
+  useEffect(() => {
+    let active = true;
+    bridge
+      .loadRepositoryTargetSettings()
+      .then((result) => {
+        if (!active || !result) return;
+        setRepositoryTarget(result);
+        setDraft((current) => ({
+          ...current,
+          repository: { ...current.repository, repositoryRootResult: result }
+        }));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [bridge]);
 
   async function loadMarkdownFile(markdownFile: SelectedMarkdownFileDto, activeBridge: DesktopBridge) {
     const next = updatePreview(await createDraftFromFile(markdownFile, profiles, activeBridge), profiles);
-    setDraft(next);
+    setDraft({ ...next, repository: { repositoryRootResult: repositoryTarget } });
     setStep(2);
   }
 
   async function selectMarkdown() {
-    setDraft({ ...emptyDraft, status: "parsing" });
+    setDraft({ ...emptyDraft, repository: { repositoryRootResult: repositoryTarget }, status: "parsing" });
     try {
       const markdownFile = await bridge.selectMarkdownFile({ maxBytes: 10 * 1024 * 1024 });
       await loadMarkdownFile(markdownFile, bridge);
     } catch (error) {
       if (isCancelError(error)) {
-        setDraft(emptyDraft);
+        setDraft({ ...emptyDraft, repository: { repositoryRootResult: repositoryTarget } });
         return;
       }
-      setDraft({ ...emptyDraft, status: "failed", error: desktopErrorMessage(error) });
+      setDraft({ ...emptyDraft, repository: { repositoryRootResult: repositoryTarget }, status: "failed", error: desktopErrorMessage(error) });
     }
   }
 
@@ -177,13 +196,13 @@ export function PublishFlow() {
       return;
     }
     if (!file) return;
-    setDraft({ ...emptyDraft, status: "parsing" });
+    setDraft({ ...emptyDraft, repository: { repositoryRootResult: repositoryTarget }, status: "parsing" });
     try {
       const browserBridge = createBrowserBridge(() => Promise.resolve(file));
       const markdownFile = await browserBridge.selectMarkdownFile({ maxBytes: 10 * 1024 * 1024 });
       await loadMarkdownFile(markdownFile, browserBridge);
     } catch (error) {
-      setDraft({ ...emptyDraft, status: "failed", error: desktopErrorMessage(error) });
+      setDraft({ ...emptyDraft, repository: { repositoryRootResult: repositoryTarget }, status: "failed", error: desktopErrorMessage(error) });
     }
     pendingFilePicker.current = undefined;
   }
@@ -216,12 +235,50 @@ export function PublishFlow() {
     setShowCreate(false);
   }
 
+  function rememberRepositoryTarget(result: RepositoryRootResult) {
+    setRepositoryTarget(result);
+    setDraft((current) => ({
+      ...current,
+      preview: { ...current.preview, workspaceResult: undefined },
+      repository: { ...current.repository, repositoryRootResult: result },
+      error: result.valid ? undefined : result.message ?? result.errors[0]
+    }));
+  }
+
+  async function chooseRepositoryTarget() {
+    try {
+      rememberRepositoryTarget(await bridge.selectRepositoryRoot());
+    } catch (error) {
+      setDraft((current) => ({ ...current, error: desktopErrorMessage(error) }));
+    }
+  }
+
+  async function revalidateRepositoryTarget() {
+    if (!repositoryTarget?.repositoryRoot) {
+      await chooseRepositoryTarget();
+      return;
+    }
+    try {
+      rememberRepositoryTarget(await bridge.validateRepositoryRoot(repositoryTarget.repositoryRoot));
+    } catch (error) {
+      setDraft((current) => ({ ...current, error: desktopErrorMessage(error) }));
+    }
+  }
+
   async function generateWorkspace() {
     if (!draft.source.markdownFile || !draft.source.parsedDocument || !selectedProfile) return;
+    if (!repoRoot) {
+      setDraft((current) => ({
+        ...current,
+        status: canContinueFromAssets(current.assets.dependencies) ? "ready" : "needs_attention",
+        error: "尚未选择有效的个人网站仓库。请选择“达芬奇的奇妙之旅”所在的 Git 仓库后继续。"
+      }));
+      return;
+    }
     setDraft((current) => ({ ...current, status: "generating_workspace", error: undefined }));
     try {
       const result = await bridge.generatePublishWorkspace({
-        repositoryRoot: "",
+        repositoryRoot: repoRoot,
         sourceMarkdownPath: draft.source.markdownFile.absolutePath,
         sourceFingerprint: (draft.source.markdownFile as SelectedMarkdownFileDto).sourceFingerprint,
         markdownContent: draft.source.markdownFile.content,
@@ -240,54 +297,45 @@ export function PublishFlow() {
   async function discardWorkspace() {
     const workspaceId = draft.preview.workspaceResult?.workspaceId;
     if (!workspaceId) return;
-    await bridge.discardPublishWorkspace(workspaceId);
+    await bridge.discardPublishWorkspace(workspaceId, repoRoot);
     setDraft((current) => updatePreview({ ...current, status: canContinueFromAssets(current.assets.dependencies) ? "ready" : "needs_attention", preview: { ...current.preview, workspaceResult: undefined } }, profiles));
   }
 
   // ─── Repository Publish Operations ─────────────────────────────────────────
-
-  async function resolveRepoRoot(workspaceId: string): Promise<string> {
-    // Try to resolve from the source markdown directory (up to 4 levels up)
-    const srcPath = draft.source.markdownFile?.absolutePath;
-    if (srcPath) {
-      const dir = srcPath.split("/").slice(0, -1).join("/");
-      const result = await bridge.resolveRepositoryRoot(dir);
-      if (result.valid) {
-        setRepoRoot(result.repositoryRoot);
-        setDraft((current) => ({
-          ...current,
-          repository: { ...current.repository, repositoryRootResult: result }
-        }));
-        return result.repositoryRoot;
-      }
-    }
-    // Fallback: use empty (Rust will reject as invalid)
-    return "";
-  }
 
   async function inspectRepo() {
     const workspaceId = draft.preview.workspaceResult?.workspaceId;
     if (!workspaceId) return;
     setDraft((current) => ({ ...current, status: "checking_repo", error: undefined }));
     try {
-      const root = await resolveRepoRoot(workspaceId);
-      if (!root) {
+      if (!repoRoot) {
         setDraft((current) => ({
           ...current,
           status: "precheck_failed",
-          error: "无法确定目标仓库根目录。请确认所选 Markdown 位于 Git 仓库中。",
+          error: "尚未选择有效的个人网站仓库。请选择“达芬奇的奇妙之旅”所在的 Git 仓库后继续。",
           repository: { ...current.repository, failedStage: "precheck" }
         }));
         return;
       }
+      const verifiedTarget = await bridge.validateRepositoryRoot(repoRoot);
+      rememberRepositoryTarget(verifiedTarget);
+      if (!verifiedTarget.valid) {
+        setDraft((current) => ({
+          ...current,
+          status: "precheck_failed",
+          error: verifiedTarget.message ?? verifiedTarget.errors[0] ?? "目标网站仓库无效。",
+          repository: { ...current.repository, repositoryRootResult: verifiedTarget, failedStage: "precheck" }
+        }));
+        return;
+      }
       const preCheck = await bridge.inspectRepositoryPublish({
-        repositoryRoot: root,
+        repositoryRoot: verifiedTarget.repositoryRoot,
         workspaceId
       });
       setDraft((current) => ({
         ...current,
         status: "confirm_write",
-        repository: { ...current.repository, preCheckResult: preCheck, failedStage: undefined }
+        repository: { ...current.repository, repositoryRootResult: verifiedTarget, preCheckResult: preCheck, failedStage: undefined }
       }));
     } catch (error) {
       setDraft((current) => ({ ...current, status: "precheck_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "precheck" } }));
@@ -301,7 +349,7 @@ export function PublishFlow() {
   async function applyWorkspace() {
     if (!draft.preview.workspaceResult) return;
     if (!repoRoot) {
-      setDraft((current) => ({ ...current, status: "write_failed", error: "尚未解析仓库根目录，请先重新预检。", repository: { ...current.repository, failedStage: "write" } }));
+      setDraft((current) => ({ ...current, status: "write_failed", error: "尚未选择有效的个人网站仓库，请先选择目标仓库。", repository: { ...current.repository, failedStage: "write" } }));
       return;
     }
     setDraft((current) => ({ ...current, status: "writing", error: undefined }));
@@ -443,6 +491,11 @@ export function PublishFlow() {
               ? "Tauri 桌面模式会读取真实文件路径，并在下一步解析相邻图片。"
               : "浏览器预览模式只能读取 Markdown 内容，不能访问相邻图片或生成临时发布工作区。"}
           </p>
+          <RepositoryTargetPanel
+            target={repositoryTarget}
+            onChoose={() => void chooseRepositoryTarget()}
+            onRevalidate={() => void revalidateRepositoryTarget()}
+          />
           <input ref={inputRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown" onChange={(event) => void handleBrowserInput(event.target.files?.[0])} />
           <button className="primary-button" type="button" onClick={() => void selectMarkdown()}>
             选择 Markdown 文件
@@ -568,6 +621,12 @@ export function PublishFlow() {
       {step === 5 && (
         <div className="panel preview-summary">
           <StepHeader title="预览并发布" eyebrow="第 5 步" />
+          <PathBlock title="源 Markdown" value={draft.source.markdownFile?.absolutePath || draft.source.markdownFile?.fileName || "未选择"} />
+          <RepositoryTargetPanel
+            target={repositoryTarget}
+            onChoose={() => void chooseRepositoryTarget()}
+            onRevalidate={() => void revalidateRepositoryTarget()}
+          />
           <PathBlock title="最终 Markdown 路径" value={draft.preview.markdownPath ?? ""} />
           <PathBlock title="最终图片目录" value={draft.preview.assetDirectory ?? ""} />
           <div className="status-grid">
@@ -588,10 +647,10 @@ export function PublishFlow() {
             <button className="secondary-button" type="button" onClick={() => setStep(4)}>
               上一步
             </button>
-            <button className="primary-button" type="button" disabled={draft.status === "generating_workspace"} onClick={() => void generateWorkspace()}>
+            <button className="primary-button" type="button" disabled={draft.status === "generating_workspace" || !repositoryTarget?.valid} onClick={() => void generateWorkspace()}>
               {draft.status === "generating_workspace" ? "正在生成..." : "生成发布工作区"}
             </button>
-            <button className="primary-button" type="button" disabled={draft.status !== "workspace_ready"} onClick={() => { setStep(6); void inspectRepo(); }}>
+            <button className="primary-button" type="button" disabled={draft.status !== "workspace_ready" || !repositoryTarget?.valid} onClick={() => { setStep(6); void inspectRepo(); }}>
               写入正式仓库
             </button>
           </div>
@@ -816,6 +875,50 @@ function PreCheckResult({ preCheck, repoRootInfo, plannedChanges, pendingProfile
         </button>
       </div>
     </div>
+  );
+}
+
+function RepositoryTargetPanel({ target, onChoose, onRevalidate }: {
+  target?: RepositoryRootResult;
+  onChoose: () => void;
+  onRevalidate: () => void;
+}) {
+  const valid = Boolean(target?.valid);
+  return (
+    <section className="write-section" aria-label="目标网站仓库">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">发布目标</p>
+          <h3>目标网站仓库</h3>
+        </div>
+        <div className="actions compact-actions">
+          <button className="secondary-button" type="button" onClick={onChoose}>
+            更换目标仓库
+          </button>
+          <button className="secondary-button" type="button" disabled={!target?.repositoryRoot} onClick={onRevalidate}>
+            重新验证仓库
+          </button>
+        </div>
+      </div>
+      <code data-testid="repository-root">{target?.displayPath || target?.repositoryRoot || "未选择"}</code>
+      {valid ? (
+        <div className="status-grid">
+          <span>当前分支：{target?.branch ?? "（无）"}</span>
+          <span>当前 HEAD：{target?.head ? target.head.slice(0, 7) : "未知"}</span>
+        </div>
+      ) : (
+        <p className="warning-text">
+          {target?.message ?? "尚未选择有效的个人网站仓库。请选择“达芬奇的奇妙之旅”所在的 Git 仓库后继续。"}
+        </p>
+      )}
+      {!valid && target?.errors && target.errors.length > 0 && (
+        <div className="validation-list">
+          {target.errors.map((error) => (
+            <span className="check-fail" key={error}>{error}</span>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

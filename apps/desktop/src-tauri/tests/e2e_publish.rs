@@ -203,6 +203,125 @@ fn e2e_full_publish_workflow() {
 }
 
 #[test]
+fn e2e_external_source_git_writes_only_to_explicit_target_repo() {
+    let target = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    init_test_repo(target.path());
+    init_test_repo(source.path());
+
+    let source_md = source.path().join("notes/checkpoint.md");
+    fs::create_dir_all(source.path().join("notes")).unwrap();
+    fs::write(
+        &source_md,
+        "# LangGraph Checkpoint\n\nSource repo must stay untouched.",
+    )
+    .unwrap();
+    let source_fingerprint = {
+        use sha2::Digest;
+        let bytes = fs::read(&source_md).unwrap();
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
+    let ws_id = uuid::Uuid::new_v4().to_string();
+    let ws_root = target.path().join(".publish-workspaces").join(&ws_id);
+    let ws_content = ws_root.join("content/ai-agent/langgraph");
+    let ws_public = ws_root.join("public/assets/notes/langgraph-checkpoint");
+    fs::create_dir_all(&ws_content).unwrap();
+    fs::create_dir_all(&ws_public).unwrap();
+    fs::write(
+        ws_content.join("langgraph-checkpoint.md"),
+        "---\ntitle: LangGraph Checkpoint\narchiveProfile: ai-agent-langgraph\nslug: langgraph-checkpoint\n---\n\n# LangGraph Checkpoint\n\n![Architecture](/assets/notes/langgraph-checkpoint/architecture.webp)",
+    )
+    .unwrap();
+    fs::write(ws_public.join("architecture.webp"), b"webp-bytes").unwrap();
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "workspace_id": ws_id,
+        "created_at": "2026-07-30T10:00:00Z",
+        "source_markdown_path": source_md.to_string_lossy().to_string(),
+        "target_markdown_path": "content/ai-agent/langgraph/langgraph-checkpoint.md",
+        "target_asset_directory": "public/assets/notes/langgraph-checkpoint",
+        "archive_profile_id": "ai-agent-langgraph",
+        "source_fingerprint": source_fingerprint,
+        "planned_changes": [
+            "content/ai-agent/langgraph/langgraph-checkpoint.md",
+            "public/assets/notes/langgraph-checkpoint"
+        ],
+        "assets": [
+            {
+                "reference_id": "image-001",
+                "source_path": null,
+                "target_path": "public/assets/notes/langgraph-checkpoint/architecture.webp",
+                "public_path": "/assets/notes/langgraph-checkpoint/architecture.webp",
+                "sha256": null,
+                "status": "written",
+                "warning": null
+            }
+        ]
+    });
+    fs::write(
+        ws_root.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let apply = davinci_journey_desktop::services::repository_publish::apply_publish_workspace(
+        ApplyWorkspaceRequest {
+            repository_root: target.path().to_string_lossy().to_string(),
+            workspace_id: ws_id,
+            operation: "create".to_string(),
+            archive_profile_changes: vec![],
+        },
+    )
+    .expect("apply external source workspace to explicit target");
+
+    assert!(target
+        .path()
+        .join("content/ai-agent/langgraph/langgraph-checkpoint.md")
+        .exists());
+    assert!(target
+        .path()
+        .join("public/assets/notes/langgraph-checkpoint/architecture.webp")
+        .exists());
+    assert!(!source
+        .path()
+        .join("content/ai-agent/langgraph/langgraph-checkpoint.md")
+        .exists());
+    assert!(!source.path().join(".publish-workspaces").exists());
+
+    let stage = stage_transaction(StageTransactionRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        transaction_id: apply.transaction_id.clone(),
+    })
+    .expect("stage explicit target transaction");
+    assert!(stage.can_commit);
+    assert!(stage
+        .staged_files
+        .iter()
+        .any(|path| path == "content/ai-agent/langgraph/langgraph-checkpoint.md"));
+    assert!(stage
+        .staged_files
+        .iter()
+        .any(|path| path == "public/assets/notes/langgraph-checkpoint/architecture.webp"));
+
+    let commit = commit_transaction(CommitTransactionRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        transaction_id: apply.transaction_id,
+        message: "docs(langgraph): add separated source smoke note".to_string(),
+    })
+    .expect("commit explicit target transaction");
+    assert!(!commit.short_hash.is_empty());
+
+    assert!(
+        fs::read_to_string(&source_md)
+            .unwrap()
+            .contains("Source repo must stay untouched."),
+        "source markdown should remain unchanged"
+    );
+}
+
+#[test]
 fn e2e_rollback_test() {
     let dir = tempfile::tempdir().unwrap();
     init_test_repo(dir.path());

@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 pub mod security;
 pub mod services;
 
+use security::repository_guard::{validate_repository_root, RepositoryRootResult};
 use services::repository_publish::{
     apply_publish_workspace, commit_transaction, pre_publish_check, rollback_publish,
     stage_transaction, ApplyWorkspaceRequest, ApplyWorkspaceResult, CommitTransactionRequest,
@@ -413,8 +414,11 @@ fn generate_publish_workspace(
 }
 
 #[tauri::command]
-fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
-    let root = repository_root();
+fn discard_publish_workspace(
+    workspace_id: String,
+    repository_root: Option<String>,
+) -> CommandResult<()> {
+    let root = validated_target_root(repository_root.as_deref())?;
     if !is_safe_workspace_id(&workspace_id) {
         return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
     }
@@ -433,9 +437,20 @@ fn discard_publish_workspace(workspace_id: String) -> CommandResult<()> {
 
 #[tauri::command]
 fn reveal_publish_workspace(path: String) -> CommandResult<()> {
-    let root = repository_root().join(".publish-workspaces");
     let target = PathBuf::from(&path);
-    ensure_child(&root, &target).map_err(CommandErrorDto::from)?;
+    let workspace_id = target
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| CommandErrorDto::from(DesktopCommandError::UnsafePath))?;
+    if !is_safe_workspace_id(workspace_id)
+        || target
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            != Some(".publish-workspaces")
+    {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
     if !target.is_dir() || is_symlink(&target) {
         return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
     }
@@ -451,12 +466,57 @@ fn reveal_publish_workspace(path: String) -> CommandResult<()> {
 }
 
 #[tauri::command]
-fn resolve_repository_root_command(
-    request: String,
-) -> CommandResult<security::repository_guard::RepositoryRootResult> {
+fn resolve_repository_root_command(request: String) -> CommandResult<RepositoryRootResult> {
     Ok(security::repository_guard::resolve_repository_root(
         &request,
     ))
+}
+
+#[tauri::command]
+fn select_repository_root() -> CommandResult<RepositoryRootResult> {
+    let Some(path) = rfd::FileDialog::new().pick_folder() else {
+        return Ok(RepositoryRootResult {
+            repository_root: String::new(),
+            display_path: String::new(),
+            branch: None,
+            head: String::new(),
+            valid: false,
+            message: Some("已取消选择目标网站仓库。".to_string()),
+            errors: vec!["已取消选择目标网站仓库。".to_string()],
+        });
+    };
+    let result = validate_repository_root(&display_path(&path));
+    if result.valid {
+        save_repository_target_settings(&result)
+            .map_err(|_| CommandErrorDto::from(DesktopCommandError::WorkspaceWriteFailed))?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn validate_repository_root_command(
+    repository_root: String,
+) -> CommandResult<RepositoryRootResult> {
+    let result = validate_repository_root(&repository_root);
+    if result.valid {
+        save_repository_target_settings(&result)
+            .map_err(|_| CommandErrorDto::from(DesktopCommandError::WorkspaceWriteFailed))?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn load_repository_target_settings() -> CommandResult<Option<RepositoryRootResult>> {
+    let path = repository_target_settings_path()
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::FileNotReadable))?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::FileNotReadable))?;
+    let stored: RepositoryRootResult = serde_json::from_str(&text)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::FileNotReadable))?;
+    Ok(Some(validate_repository_root(&stored.repository_root)))
 }
 
 // ─── Repository Publish Commands ────────────────────────────────────────────
@@ -544,6 +604,9 @@ pub fn run() {
             discard_publish_workspace,
             reveal_publish_workspace,
             resolve_repository_root_command,
+            select_repository_root,
+            validate_repository_root_command,
+            load_repository_target_settings,
             inspect_repository_publish,
             apply_publish_workspace_command,
             get_publish_diff_command,
@@ -555,13 +618,51 @@ pub fn run() {
         .expect("failed to run desktop app");
 }
 
-fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn validated_target_root(candidate: Option<&str>) -> Result<PathBuf, CommandErrorDto> {
+    let Some(candidate) = candidate else {
+        return Err(CommandErrorDto::from(
+            DesktopCommandError::GitRepositoryNotFound,
+        ));
+    };
+    let result = validate_repository_root(candidate);
+    if !result.valid {
+        return Err(CommandErrorDto {
+            code: DesktopCommandError::GitRepositoryNotFound
+                .code()
+                .to_string(),
+            message: result.message.unwrap_or_else(|| {
+                DesktopCommandError::GitRepositoryNotFound
+                    .message()
+                    .to_string()
+            }),
+            technical_message: Some(result.errors.join("; ")),
+            affected_path: Some(candidate.to_string()),
+            recoverable: true,
+        });
+    }
+    Ok(PathBuf::from(result.repository_root))
+}
+
+fn repository_target_settings_path() -> Result<PathBuf, String> {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .ok_or_else(|| "无法定位本地应用配置目录。".to_string())?;
+    Ok(base.join("davinci-journey").join("repository-target.json"))
+}
+
+fn save_repository_target_settings(result: &RepositoryRootResult) -> Result<(), String> {
+    let path = repository_target_settings_path()?;
+    let parent = path
         .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .ok_or_else(|| "无法定位本地应用配置目录。".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("无法创建配置目录：{}", e))?;
+    fs::write(
+        path,
+        serde_json::to_string_pretty(result).map_err(|e| format!("无法序列化配置：{}", e))?,
+    )
+    .map_err(|e| format!("无法写入配置：{}", e))
 }
 
 fn read_markdown_file(
@@ -653,11 +754,14 @@ fn resolve_dependencies(
 fn generate_workspace(
     request: GeneratePublishWorkspaceRequest,
 ) -> Result<GeneratePublishWorkspaceResult, DesktopCommandError> {
-    let repo_root = if request.repository_root.trim().is_empty() {
-        repository_root()
-    } else {
-        PathBuf::from(&request.repository_root)
-    };
+    if request.repository_root.trim().is_empty() {
+        return Err(DesktopCommandError::GitRepositoryNotFound);
+    }
+    let target = validate_repository_root(&request.repository_root);
+    if !target.valid {
+        return Err(DesktopCommandError::GitRepositoryNotFound);
+    }
+    let repo_root = PathBuf::from(target.repository_root);
     let workspace_id = Uuid::new_v4().to_string();
     let workspace_root = repo_root.join(".publish-workspaces");
     let workspace = workspace_root.join(&workspace_id);
@@ -1436,6 +1540,7 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::tempdir;
 
     fn png_bytes() -> Vec<u8> {
@@ -1457,6 +1562,78 @@ mod tests {
             path_kind: "relative".to_string(),
             line: Some(1),
             column: Some(1),
+        }
+    }
+
+    fn init_target_repo(dir: &Path) {
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@davinci.test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Davinci Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        fs::create_dir_all(dir.join("content/other/uncategorized")).unwrap();
+        fs::create_dir_all(dir.join("public/assets/notes")).unwrap();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::write(
+            dir.join("config/archive-profiles.yml"),
+            "archiveProfiles:\n  - id: uncategorized\n    name: Other\n    category: Other\n    topic: Uncategorized\n    directory: content/other/uncategorized\n    defaultTags: []\n",
+        )
+        .unwrap();
+        fs::write(dir.join("README.md"), "# Target Repo").unwrap();
+        Command::new("git")
+            .args(["add", "README.md", "config/archive-profiles.yml"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    fn workspace_request(
+        repo: &Path,
+        source: &Path,
+        content: &str,
+    ) -> GeneratePublishWorkspaceRequest {
+        GeneratePublishWorkspaceRequest {
+            repository_root: display_path(repo),
+            source_markdown_path: display_path(source),
+            source_fingerprint: sha256_hex(content.as_bytes()),
+            markdown_content: content.to_string(),
+            article: ArticleInfoDto {
+                title: "Title".to_string(),
+                description: "".to_string(),
+                slug: "title".to_string(),
+                tags: vec![],
+                date: "2026-07-30".to_string(),
+                updated: "2026-07-30".to_string(),
+                draft: false,
+                featured: false,
+            },
+            archive_profile: ArchiveProfileDto {
+                id: "uncategorized".to_string(),
+                name: "Other".to_string(),
+                category: "Other".to_string(),
+                topic: Some("Uncategorized".to_string()),
+                directory: "content/other/uncategorized".to_string(),
+                default_tags: vec![],
+                description: None,
+            },
+            image_references: vec![],
+            dependencies: vec![],
+            pending_archive_profiles: vec![],
         }
     }
 
@@ -1552,39 +1729,42 @@ mod tests {
 
     #[test]
     fn creates_and_discards_workspace() {
-        let dir = tempdir().unwrap();
-        let md = dir.path().join("note.md");
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        init_target_repo(target.path());
+        let md = source.path().join("note.md");
         fs::write(&md, "# Title").unwrap();
-        let request = GeneratePublishWorkspaceRequest {
-            repository_root: display_path(dir.path()),
-            source_markdown_path: display_path(&md),
-            source_fingerprint: sha256_hex(b"# Title"),
-            markdown_content: "# Title".to_string(),
-            article: ArticleInfoDto {
-                title: "Title".to_string(),
-                description: "".to_string(),
-                slug: "title".to_string(),
-                tags: vec![],
-                date: "2026-07-30".to_string(),
-                updated: "2026-07-30".to_string(),
-                draft: false,
-                featured: false,
-            },
-            archive_profile: ArchiveProfileDto {
-                id: "uncategorized".to_string(),
-                name: "Other".to_string(),
-                category: "Other".to_string(),
-                topic: Some("Uncategorized".to_string()),
-                directory: "content/other/uncategorized".to_string(),
-                default_tags: vec![],
-                description: None,
-            },
-            image_references: vec![],
-            dependencies: vec![],
-            pending_archive_profiles: vec![],
-        };
+        let request = workspace_request(target.path(), &md, "# Title");
         let result = generate_workspace(request).unwrap();
         assert!(Path::new(&result.workspace_path).exists());
+        fs::remove_dir_all(result.workspace_path).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_repository_root_for_workspace() {
+        let source = tempdir().unwrap();
+        let md = source.path().join("note.md");
+        fs::write(&md, "# Title").unwrap();
+        let mut request = workspace_request(source.path(), &md, "# Title");
+        request.repository_root = String::new();
+        assert!(matches!(
+            generate_workspace(request),
+            Err(DesktopCommandError::GitRepositoryNotFound)
+        ));
+    }
+
+    #[test]
+    fn writes_workspace_under_explicit_target_when_source_is_external() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        init_target_repo(target.path());
+        let md = source.path().join("external-note.md");
+        fs::write(&md, "# Title").unwrap();
+
+        let result = generate_workspace(workspace_request(target.path(), &md, "# Title")).unwrap();
+        assert!(Path::new(&result.workspace_path).starts_with(target.path()));
+        assert!(Path::new(&result.target_markdown_path).starts_with(target.path()));
+        assert!(!source.path().join(".publish-workspaces").exists());
         fs::remove_dir_all(result.workspace_path).unwrap();
     }
 }

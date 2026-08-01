@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PublishFlow } from "../src/components/PublishFlow";
 
 function markdownFile(content = "# LangGraph Checkpoint\n\n![图](./images/a.png)\n\nLangGraph checkpoint") {
@@ -12,6 +12,11 @@ async function selectMarkdown(content?: string) {
   fireEvent.change(fileInput, { target: { files: [markdownFile(content)] } });
   await waitFor(() => expect(screen.getByText("检查图片")).toBeInTheDocument());
 }
+
+afterEach(() => {
+  delete (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  vi.doUnmock("@tauri-apps/api/core");
+});
 
 describe("PublishFlow", () => {
   it("选择真实 Markdown 后生成草稿", async () => {
@@ -69,5 +74,86 @@ describe("PublishFlow", () => {
     expect(screen.getByText("生成发布工作区")).toBeInTheDocument();
     expect(screen.queryByText("发布成功")).not.toBeInTheDocument();
     expect(screen.getByText("content/ai-agent/langgraph/langgraph-checkpoint.md")).toBeInTheDocument();
+  });
+
+  it("恢复已保存目标仓库并与源 Markdown 分开显示", async () => {
+    (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    const target = {
+      repositoryRoot: "D:/target-site",
+      displayPath: "D:/target-site",
+      branch: "main",
+      head: "1234567890abcdef",
+      valid: true,
+      errors: []
+    };
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "load_repository_target_settings") return target;
+      if (command === "select_markdown_file") {
+        return {
+          absolutePath: "D:/external-notes/checkpoint.md",
+          fileName: "checkpoint.md",
+          directoryPath: "D:/external-notes",
+          size: 32,
+          modifiedAt: "2026-07-30T00:00:00Z",
+          content: "# LangGraph Checkpoint",
+          sourceFingerprint: "a".repeat(64)
+        };
+      }
+      if (command === "resolve_image_dependencies") return [];
+      return undefined;
+    });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+
+    render(<PublishFlow />);
+    await waitFor(() => expect(screen.getByTestId("repository-root")).toHaveTextContent("D:/target-site"));
+    fireEvent.click(screen.getByText("选择 Markdown 文件"));
+    await waitFor(() => expect(screen.getByText("检查图片")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("下一步"));
+
+    expect(screen.getByText("D:/external-notes/checkpoint.md")).toBeInTheDocument();
+    expect(screen.getByTestId("repository-root")).toHaveTextContent("D:/target-site");
+    expect(invoke).not.toHaveBeenCalledWith("resolve_repository_root_command", expect.anything());
+  });
+
+  it("目标仓库无效时禁用工作区生成", async () => {
+    (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "load_repository_target_settings") {
+        return {
+          repositoryRoot: "D:/not-site",
+          displayPath: "D:/not-site",
+          head: "",
+          valid: false,
+          message: "目标网站仓库结构不完整",
+          errors: ["目标仓库缺少 content/ 目录。"]
+        };
+      }
+      if (command === "select_markdown_file") {
+        return {
+          absolutePath: "D:/external-notes/checkpoint.md",
+          fileName: "checkpoint.md",
+          directoryPath: "D:/external-notes",
+          size: 32,
+          modifiedAt: "2026-07-30T00:00:00Z",
+          content: "# LangGraph Checkpoint",
+          sourceFingerprint: "a".repeat(64)
+        };
+      }
+      if (command === "resolve_image_dependencies") return [];
+      return undefined;
+    });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+
+    render(<PublishFlow />);
+    await waitFor(() => expect(screen.getByTestId("repository-root")).toHaveTextContent("D:/not-site"));
+    fireEvent.click(screen.getByText("选择 Markdown 文件"));
+    await waitFor(() => expect(screen.getByText("检查图片")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("下一步"));
+
+    expect(screen.getByText("生成发布工作区")).toBeDisabled();
   });
 });

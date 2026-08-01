@@ -148,13 +148,16 @@ pub fn inspect_repository(repo_root: &Path) -> Result<GitRepositoryStatus, Strin
 }
 
 /// Resolve the repository root from a starting directory, returning a structured result.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RepositoryRootResult {
     pub repository_root: String,
+    pub display_path: String,
     pub branch: Option<String>,
     pub head: String,
     pub valid: bool,
     pub message: Option<String>,
+    pub errors: Vec<String>,
 }
 
 /// Resolve and validate a repository root from a candidate path.
@@ -165,32 +168,38 @@ pub fn resolve_repository_root(candidate: &str) -> RepositoryRootResult {
     if candidate.trim().is_empty() {
         return RepositoryRootResult {
             repository_root: String::new(),
+            display_path: String::new(),
             branch: None,
             head: String::new(),
             valid: false,
             message: Some(
-                "未指定仓库根目录。请选择 Markdown 文件所在 Git 仓库的根目录。".to_string(),
+                "未指定目标网站仓库。请选择“达芬奇的奇妙之旅”所在的 Git 仓库。".to_string(),
             ),
+            errors: vec!["未指定目标网站仓库。".to_string()],
         };
     }
 
     if !path.exists() {
         return RepositoryRootResult {
             repository_root: candidate.to_string(),
+            display_path: candidate.to_string(),
             branch: None,
             head: String::new(),
             valid: false,
             message: Some(format!("目录不存在：{}", candidate)),
+            errors: vec![format!("目录不存在：{}", candidate)],
         };
     }
 
     if !path.is_dir() {
         return RepositoryRootResult {
             repository_root: candidate.to_string(),
+            display_path: candidate.to_string(),
             branch: None,
             head: String::new(),
             valid: false,
             message: Some(format!("路径不是目录：{}", candidate)),
+            errors: vec![format!("路径不是目录：{}", candidate)],
         };
     }
 
@@ -198,22 +207,57 @@ pub fn resolve_repository_root(candidate: &str) -> RepositoryRootResult {
         Ok(root) => {
             let branch = current_branch(&root).ok().flatten();
             let head = resolve_head(&root).unwrap_or_default();
+            let root_display = root.to_string_lossy().replace('\\', "/");
             RepositoryRootResult {
-                repository_root: root.to_string_lossy().replace('\\', "/"),
+                repository_root: root_display.clone(),
+                display_path: root_display,
                 branch,
                 head,
                 valid: true,
                 message: None,
+                errors: Vec::new(),
             }
         }
         Err(e) => RepositoryRootResult {
             repository_root: candidate.to_string(),
+            display_path: candidate.to_string(),
             branch: None,
             head: String::new(),
             valid: false,
             message: Some(e),
+            errors: vec!["目录不是有效的 Git 仓库。".to_string()],
         },
     }
+}
+
+/// Validate that the selected directory is the target website repository root.
+pub fn validate_repository_root(candidate: &str) -> RepositoryRootResult {
+    let mut result = resolve_repository_root(candidate);
+    if !result.valid {
+        return result;
+    }
+
+    let root = PathBuf::from(&result.repository_root);
+    let mut errors = Vec::new();
+    if !root.join(".git").exists() {
+        errors.push("目标目录必须是 Git 仓库根目录，并包含 .git。".to_string());
+    }
+    if !root.join("content").is_dir() {
+        errors.push("目标仓库缺少 content/ 目录。".to_string());
+    }
+    if !root.join("public").join("assets").join("notes").is_dir() {
+        errors.push("目标仓库缺少 public/assets/notes/ 目录。".to_string());
+    }
+    if !root.join("config").join("archive-profiles.yml").is_file() {
+        errors.push("目标仓库缺少 config/archive-profiles.yml。".to_string());
+    }
+
+    if !errors.is_empty() {
+        result.valid = false;
+        result.message = Some("目标网站仓库结构不完整，请选择正确的仓库根目录。".to_string());
+        result.errors = errors;
+    }
+    result
 }
 
 /// Check that HEAD has not changed since we last inspected. Used before commit.
@@ -285,6 +329,29 @@ mod tests {
             .unwrap();
     }
 
+    fn init_target_repo(dir: &Path) {
+        init_repo(dir);
+        fs::create_dir_all(dir.join("content")).unwrap();
+        fs::create_dir_all(dir.join("public").join("assets").join("notes")).unwrap();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::write(
+            dir.join("config/archive-profiles.yml"),
+            "archiveProfiles: []\n",
+        )
+        .unwrap();
+        fs::write(dir.join("README.md"), "# Target").unwrap();
+        Command::new("git")
+            .args(["add", "README.md", "config/archive-profiles.yml"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
     #[test]
     fn finds_repo_root() {
         let dir = tempdir().unwrap();
@@ -348,6 +415,27 @@ mod tests {
             .unwrap();
         let branch = current_branch(dir.path()).unwrap();
         assert!(branch.is_some(), "Expected branch to exist after commit");
+    }
+
+    #[test]
+    fn validates_explicit_target_repository_structure() {
+        let dir = tempdir().unwrap();
+        init_target_repo(dir.path());
+        let result = validate_repository_root(&dir.path().to_string_lossy());
+        assert!(result.valid);
+        assert!(result.errors.is_empty());
+        assert!(result
+            .display_path
+            .contains(dir.path().file_name().unwrap().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn rejects_target_without_required_content_structure() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        let result = validate_repository_root(&dir.path().to_string_lossy());
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| error.contains("content/")));
     }
 
     #[test]

@@ -71,6 +71,31 @@ describe("DesktopBridge", () => {
     vi.doUnmock("@tauri-apps/api/core");
   });
 
+  it("uses explicit Tauri repository target commands", async () => {
+    const target = {
+      repositoryRoot: "D:/site",
+      displayPath: "D:/site",
+      branch: "main",
+      head: "abc123",
+      valid: true,
+      errors: []
+    };
+    const invoke = vi.fn().mockResolvedValue(target);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const bridge = createTauriBridge();
+
+    await bridge.selectRepositoryRoot();
+    await bridge.validateRepositoryRoot("D:/site");
+    await bridge.loadRepositoryTargetSettings();
+    await bridge.discardPublishWorkspace("workspace-id", "D:/site");
+
+    expect(invoke).toHaveBeenCalledWith("select_repository_root", undefined);
+    expect(invoke).toHaveBeenCalledWith("validate_repository_root_command", { repositoryRoot: "D:/site" });
+    expect(invoke).toHaveBeenCalledWith("load_repository_target_settings", undefined);
+    expect(invoke).toHaveBeenCalledWith("discard_publish_workspace", { workspaceId: "workspace-id", repositoryRoot: "D:/site" });
+    vi.doUnmock("@tauri-apps/api/core");
+  });
+
   it("reload markdown updates draft source through new selection", async () => {
     const picker = vi.fn().mockResolvedValueOnce(markdownFile("# A")).mockResolvedValueOnce(markdownFile("# B"));
     const bridge = createBrowserBridge(picker);
