@@ -1,0 +1,54 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getNotes } from "../../lib/content";
+import { withBase } from "../../lib/site";
+
+const notes = getNotes();
+---
+
+<BaseLayout title="搜索">
+  <section class="section">
+    <h1>搜索</h1>
+    <label class="search-label" for="search-input">搜索公开笔记</label>
+    <input id="search-input" class="search-input" type="search" placeholder="输入标题、摘要、分类或标签" autocomplete="off" />
+    <div class="grid" data-results>
+      {notes.map((note) => (
+        <a class="card" href={withBase(note.urlPath)} data-search={`${note.title} ${note.description} ${note.category} ${note.topic ?? ""} ${note.tags.join(" ")}`.toLowerCase()}>
+          <span class="pill">{note.category}</span>
+          <h2>{note.title}</h2>
+          <p>{note.description}</p>
+        </a>
+      ))}
+    </div>
+    {notes.length === 0 && <p class="empty">还没有可搜索的公开笔记。</p>}
+  </section>
+  <script>
+    const input = document.querySelector<HTMLInputElement>("#search-input");
+    const cards = Array.from(document.querySelectorAll<HTMLElement>("[data-search]"));
+    input?.addEventListener("input", () => {
+      const query = input.value.trim().toLowerCase();
+      cards.forEach((card) => {
+        card.hidden = query.length > 0 && !card.dataset.search?.includes(query);
+      });
+    });
+  </script>
+</BaseLayout>
+
+<style>
+  .search-label {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--muted);
+  }
+
+  .search-input {
+    width: 100%;
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    padding: 14px 16px;
+  }
+</style>

@@ -1,0 +1,27 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getNotes } from "../../lib/content";
+import { withBase } from "../../lib/site";
+
+const notes = getNotes();
+---
+
+<BaseLayout title="笔记">
+  <section class="section">
+    <h1>笔记</h1>
+    {notes.length === 0 ? (
+      <p class="empty">还没有公开笔记。发布工具完成第一篇正式提交后，这里会展示全部 Markdown 内容。</p>
+    ) : (
+      <div class="grid">
+        {notes.map((note) => (
+          <a class="card" href={withBase(note.urlPath)}>
+            <span class="pill">{note.category}</span>
+            <h2>{note.title}</h2>
+            <p>{note.description}</p>
+            <p class="meta">{note.updated || note.date}</p>
+          </a>
+        ))}
+      </div>
+    )}
+  </section>
+</BaseLayout>

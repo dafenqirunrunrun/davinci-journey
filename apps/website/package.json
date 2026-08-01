@@ -1,0 +1,22 @@
+{
+  "name": "@davinci-journey/website",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "lint": "astro-check && tsc -p tsconfig.json --noEmit",
+    "typecheck": "astro-check && tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "astro-check && astro build"
+  },
+  "dependencies": {
+    "astro": "^4.15.9",
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

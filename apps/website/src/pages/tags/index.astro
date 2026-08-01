@@ -1,0 +1,26 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getNotes, uniqueValues } from "../../lib/content";
+import { withBase } from "../../lib/site";
+
+const notes = getNotes();
+const tags = uniqueValues(notes.flatMap((note) => note.tags));
+---
+
+<BaseLayout title="标签">
+  <section class="section">
+    <h1>标签</h1>
+    {tags.length === 0 ? (
+      <p class="empty">还没有公开标签。</p>
+    ) : (
+      <div class="grid">
+        {tags.map((tag) => (
+          <a class="card" href={withBase(`/tags/${encodeURIComponent(tag)}/`)}>
+            <span class="pill">{notes.filter((note) => note.tags.includes(tag)).length} 篇</span>
+            <h2>{tag}</h2>
+          </a>
+        ))}
+      </div>
+    )}
+  </section>
+</BaseLayout>

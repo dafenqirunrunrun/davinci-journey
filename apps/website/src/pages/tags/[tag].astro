@@ -1,0 +1,30 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getNotes, uniqueValues } from "../../lib/content";
+import { withBase } from "../../lib/site";
+
+export function getStaticPaths() {
+  const notes = getNotes();
+  return uniqueValues(notes.flatMap((note) => note.tags)).map((tag) => ({
+    params: { tag },
+    props: { tag, notes: notes.filter((note) => note.tags.includes(tag)) }
+  }));
+}
+
+const { tag, notes } = Astro.props;
+---
+
+<BaseLayout title={tag}>
+  <section class="section">
+    <h1>{tag}</h1>
+    <div class="grid">
+      {notes.map((note) => (
+        <a class="card" href={withBase(note.urlPath)}>
+          <span class="pill">{note.category}</span>
+          <h2>{note.title}</h2>
+          <p>{note.description}</p>
+        </a>
+      ))}
+    </div>
+  </section>
+</BaseLayout>

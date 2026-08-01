@@ -1,0 +1,26 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getArchiveProfiles, getNotes, uniqueValues } from "../../lib/content";
+import { withBase } from "../../lib/site";
+
+const notes = getNotes();
+const categories = uniqueValues([...getArchiveProfiles().map((profile) => profile.category), ...notes.map((note) => note.category)]);
+---
+
+<BaseLayout title="分类">
+  <section class="section">
+    <h1>分类</h1>
+    <div class="grid">
+      {categories.map((category) => {
+        const count = notes.filter((note) => note.category === category).length;
+        return (
+          <a class="card" href={withBase(`/categories/${encodeURIComponent(category)}/`)}>
+            <span class="pill">{count} 篇</span>
+            <h2>{category}</h2>
+            <p class="meta">按主分类聚合公开笔记。</p>
+          </a>
+        );
+      })}
+    </div>
+  </section>
+</BaseLayout>

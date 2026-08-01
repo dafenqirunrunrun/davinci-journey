@@ -1,0 +1,25 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getNotes, renderNoteHtml } from "../../lib/content";
+import { REPOSITORY_URL } from "../../lib/site";
+
+export function getStaticPaths() {
+  return getNotes().map((note) => ({
+    params: { slug: note.slug },
+    props: { note }
+  }));
+}
+
+const { note } = Astro.props;
+const html = renderNoteHtml(note.body);
+---
+
+<BaseLayout title={note.title} description={note.description}>
+  <article class="section prose">
+    <p class="meta">{note.category}{note.topic ? ` / ${note.topic}` : ""}</p>
+    <h1>{note.title}</h1>
+    <p class="lead">{note.description}</p>
+    <p class="meta">更新：{note.updated || note.date || "未标注"} · <a href={`${REPOSITORY_URL}/blob/master/${note.sourcePath}`}>在 GitHub 查看源文件</a></p>
+    <div set:html={html} />
+  </article>
+</BaseLayout>

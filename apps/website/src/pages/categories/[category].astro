@@ -1,0 +1,35 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getArchiveProfiles, getNotes, uniqueValues } from "../../lib/content";
+import { withBase } from "../../lib/site";
+
+export function getStaticPaths() {
+  const notes = getNotes();
+  const categories = uniqueValues([...getArchiveProfiles().map((profile) => profile.category), ...notes.map((note) => note.category)]);
+  return categories.map((category) => ({
+    params: { category },
+    props: { category, notes: notes.filter((note) => note.category === category) }
+  }));
+}
+
+const { category, notes } = Astro.props;
+---
+
+<BaseLayout title={category}>
+  <section class="section">
+    <h1>{category}</h1>
+    {notes.length === 0 ? (
+      <p class="empty">这个分类还没有公开笔记。</p>
+    ) : (
+      <div class="grid">
+        {notes.map((note) => (
+          <a class="card" href={withBase(note.urlPath)}>
+            <span class="pill">{note.topic || note.category}</span>
+            <h2>{note.title}</h2>
+            <p>{note.description}</p>
+          </a>
+        ))}
+      </div>
+    )}
+  </section>
+</BaseLayout>
