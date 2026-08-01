@@ -109,6 +109,9 @@ pub fn parse_status(repo_root: &Path) -> Result<(Vec<GitChange>, Vec<String>), S
         let staged = &line[..1];
         let unstaged = &line[1..2];
         let path = &line[3..];
+        if is_publish_workspace_status_path(path) {
+            continue;
+        }
 
         if staged == "?" && unstaged == "?" {
             untracked.push(path.to_string());
@@ -122,6 +125,11 @@ pub fn parse_status(repo_root: &Path) -> Result<(Vec<GitChange>, Vec<String>), S
     }
 
     Ok((changes, untracked))
+}
+
+fn is_publish_workspace_status_path(path: &str) -> bool {
+    let normalized = path.trim_matches('"').replace('\\', "/");
+    normalized == ".publish-workspaces" || normalized.starts_with(".publish-workspaces/")
 }
 
 /// Gather the full repository status.
@@ -393,6 +401,26 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
         let (changes, untracked) = parse_status(dir.path()).unwrap();
+        assert!(changes.is_empty());
+        assert!(untracked.is_empty());
+    }
+
+    #[test]
+    fn ignores_publish_workspaces_status() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        fs::create_dir_all(dir.path().join(".publish-workspaces").join("workspace-1")).unwrap();
+        fs::write(
+            dir.path()
+                .join(".publish-workspaces")
+                .join("workspace-1")
+                .join("manifest.json"),
+            "{}",
+        )
+        .unwrap();
+
+        let (changes, untracked) = parse_status(dir.path()).unwrap();
+
         assert!(changes.is_empty());
         assert!(untracked.is_empty());
     }

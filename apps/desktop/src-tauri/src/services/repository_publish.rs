@@ -21,6 +21,21 @@ fn current_transaction() -> &'static Mutex<Option<String>> {
     CURRENT_TRANSACTION.get_or_init(|| Mutex::new(None))
 }
 
+fn manifest_string<'a>(
+    manifest: &'a serde_json::Value,
+    camel_case_key: &str,
+    snake_case_key: &str,
+) -> Option<&'a str> {
+    manifest
+        .get(camel_case_key)
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            manifest
+                .get(snake_case_key)
+                .and_then(|value| value.as_str())
+        })
+}
+
 // ─── DTOs ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -276,9 +291,9 @@ fn validate_workspace(workspace_root: &Path) -> Result<WorkspaceValidationDto, S
             fs::read_to_string(&manifest_path).map_err(|_| "无法读取 manifest.json".to_string())?;
         let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
             .map_err(|_| "manifest.json 格式无效".to_string())?;
-        manifest_valid = manifest.get("workspace_id").is_some()
+        manifest_valid = manifest_string(&manifest, "workspaceId", "workspace_id").is_some()
             && manifest.get("version").is_some()
-            && manifest.get("created_at").is_some();
+            && manifest_string(&manifest, "createdAt", "created_at").is_some();
     }
     checks.push("Manifest 有效".to_string());
 
@@ -400,10 +415,10 @@ fn check_source_fingerprints(workspace_root: &Path) -> Result<SourceFingerprintS
     let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
         .map_err(|_| "manifest.json 格式无效".to_string())?;
 
-    let source_path = manifest["source_markdown_path"].as_str().map(PathBuf::from);
+    let source_path =
+        manifest_string(&manifest, "sourceMarkdownPath", "source_markdown_path").map(PathBuf::from);
 
-    let source_fingerprint = manifest["source_fingerprint"]
-        .as_str()
+    let source_fingerprint = manifest_string(&manifest, "sourceFingerprint", "source_fingerprint")
         .unwrap_or("")
         .to_string();
 
@@ -426,7 +441,7 @@ fn check_source_fingerprints(workspace_root: &Path) -> Result<SourceFingerprintS
     // Check workspace assets for source paths
     if let Some(assets) = manifest["assets"].as_array() {
         for asset in assets {
-            if let Some(source_path) = asset["source_path"].as_str() {
+            if let Some(source_path) = manifest_string(asset, "sourcePath", "source_path") {
                 let source = PathBuf::from(source_path);
                 if source.exists() {
                     if let Ok(bytes) = fs::read(&source) {
@@ -472,8 +487,7 @@ fn check_target_conflicts(
     let manifest: serde_json::Value = serde_json::from_str(&manifest_content)
         .map_err(|_| "manifest.json 格式无效".to_string())?;
 
-    let target_md = manifest["target_markdown_path"]
-        .as_str()
+    let target_md = manifest_string(&manifest, "targetMarkdownPath", "target_markdown_path")
         .unwrap_or("")
         .to_string();
 
@@ -523,8 +537,7 @@ pub fn apply_publish_workspace(
         .map_err(|_| "manifest.json 格式无效".to_string())?;
 
     // Verify source markdown path is present
-    let source_path = manifest["source_markdown_path"]
-        .as_str()
+    let source_path = manifest_string(&manifest, "sourceMarkdownPath", "source_markdown_path")
         .unwrap_or("")
         .to_string();
     if source_path.is_empty() {
@@ -551,7 +564,9 @@ pub fn apply_publish_workspace(
     let mut planned_changes = Vec::new();
 
     // Target markdown
-    if let Some(target_md) = manifest["target_markdown_path"].as_str() {
+    if let Some(target_md) =
+        manifest_string(&manifest, "targetMarkdownPath", "target_markdown_path")
+    {
         let workspace_md = workspace_root.join(target_md);
         if workspace_md.exists() {
             let bytes = fs::read(&workspace_md)
@@ -575,7 +590,7 @@ pub fn apply_publish_workspace(
     // Assets
     if let Some(assets) = manifest["assets"].as_array() {
         for asset in assets {
-            if let Some(target_path) = asset["target_path"].as_str() {
+            if let Some(target_path) = manifest_string(asset, "targetPath", "target_path") {
                 // Normalize to repo-relative path
                 let rel_path = workspace_relative_path(&workspace_root, target_path);
                 if let Ok(rp) = rel_path {
@@ -1004,6 +1019,7 @@ fn is_valid_conventional_commit(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn validates_conventional_commit() {
@@ -1018,5 +1034,33 @@ mod tests {
         assert!(!is_valid_conventional_commit("bad commit message"));
         assert!(!is_valid_conventional_commit(""));
         assert!(!is_valid_conventional_commit("feat:"));
+    }
+
+    #[test]
+    fn validates_camel_case_workspace_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let content_dir = workspace.join("content").join("ai-agent").join("langgraph");
+        fs::create_dir_all(&content_dir).unwrap();
+        fs::write(content_dir.join("note.md"), "# Note").unwrap();
+        fs::write(
+            workspace.join("manifest.json"),
+            r#"{
+              "version": 1,
+              "workspaceId": "workspace-1",
+              "createdAt": "2026-08-01T00:00:00Z",
+              "sourceMarkdownPath": "C:/notes/note.md",
+              "targetMarkdownPath": "content/ai-agent/langgraph/note.md",
+              "sourceFingerprint": "abc123",
+              "assets": []
+            }"#,
+        )
+        .unwrap();
+
+        let result = validate_workspace(workspace).unwrap();
+
+        assert!(result.passed);
+        assert!(result.manifest_valid);
+        assert!(result.markdown_valid);
     }
 }

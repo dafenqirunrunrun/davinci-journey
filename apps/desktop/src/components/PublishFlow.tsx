@@ -14,6 +14,7 @@ import { parseMarkdown } from "@davinci-journey/markdown-core";
 import { initialArchiveProfiles } from "../archiveProfiles";
 import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
+import { getPublishWriteEligibility, publishWriteBlockReasonText } from "../publishWriteEligibility";
 
 const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览并发布", "写入仓库"];
 const today = "2026-07-30";
@@ -235,11 +236,11 @@ export function PublishFlow() {
     setShowCreate(false);
   }
 
-  function rememberRepositoryTarget(result: RepositoryRootResult) {
+  function rememberRepositoryTarget(result: RepositoryRootResult, options: { preserveWorkspace?: boolean } = {}) {
     setRepositoryTarget(result);
     setDraft((current) => ({
       ...current,
-      preview: { ...current.preview, workspaceResult: undefined },
+      preview: options.preserveWorkspace ? current.preview : { ...current.preview, workspaceResult: undefined },
       repository: { ...current.repository, repositoryRootResult: result },
       error: result.valid ? undefined : result.message ?? result.errors[0]
     }));
@@ -259,7 +260,7 @@ export function PublishFlow() {
       return;
     }
     try {
-      rememberRepositoryTarget(await bridge.validateRepositoryRoot(repositoryTarget.repositoryRoot));
+      rememberRepositoryTarget(await bridge.validateRepositoryRoot(repositoryTarget.repositoryRoot), { preserveWorkspace: true });
     } catch (error) {
       setDraft((current) => ({ ...current, error: desktopErrorMessage(error) }));
     }
@@ -318,7 +319,7 @@ export function PublishFlow() {
         return;
       }
       const verifiedTarget = await bridge.validateRepositoryRoot(repoRoot);
-      rememberRepositoryTarget(verifiedTarget);
+      rememberRepositoryTarget(verifiedTarget, { preserveWorkspace: true });
       if (!verifiedTarget.valid) {
         setDraft((current) => ({
           ...current,
@@ -346,16 +347,21 @@ export function PublishFlow() {
     await inspectRepo();
   }
 
+  function getRepositoryRootForWrite(): string {
+    return draft.repository.preCheckResult?.gitStatus.repositoryRoot || draft.repository.repositoryRootResult?.repositoryRoot || repoRoot;
+  }
+
   async function applyWorkspace() {
     if (!draft.preview.workspaceResult) return;
-    if (!repoRoot) {
+    const writeRepositoryRoot = getRepositoryRootForWrite();
+    if (!writeRepositoryRoot) {
       setDraft((current) => ({ ...current, status: "write_failed", error: "尚未选择有效的个人网站仓库，请先选择目标仓库。", repository: { ...current.repository, failedStage: "write" } }));
       return;
     }
     setDraft((current) => ({ ...current, status: "writing", error: undefined }));
     try {
       const result = await bridge.applyPublishWorkspace({
-        repositoryRoot: repoRoot,
+        repositoryRoot: writeRepositoryRoot,
         workspaceId: draft.preview.workspaceResult.workspaceId,
         operation: draft.repository.preCheckResult?.targetConflicts.targetExists ? "update" : "create",
         archiveProfileChanges: draft.archive.pendingProfileChanges
@@ -391,7 +397,7 @@ export function PublishFlow() {
     try {
       const paths = draft.repository.applyResult?.plannedChanges.map((c) => c.path) ?? [];
       const diffResult = await bridge.getPublishDiff({
-        repositoryRoot: repoRoot,
+        repositoryRoot: getRepositoryRootForWrite(),
         paths
       });
       setDraft((current) => ({
@@ -410,7 +416,7 @@ export function PublishFlow() {
     setDraft((current) => ({ ...current, status: "staging", error: undefined }));
     try {
       const stageResult = await bridge.stagePublishTransaction({
-        repositoryRoot: repoRoot,
+        repositoryRoot: getRepositoryRootForWrite(),
         transactionId: txId
       });
       if (!stageResult.canCommit) {
@@ -438,7 +444,7 @@ export function PublishFlow() {
     setDraft((current) => ({ ...current, status: "confirm_commit", error: undefined }));
     try {
       const commitResult = await bridge.commitPublishTransaction({
-        repositoryRoot: repoRoot,
+        repositoryRoot: getRepositoryRootForWrite(),
         transactionId: txId,
         message: commitMessage.trim()
       });
@@ -458,7 +464,7 @@ export function PublishFlow() {
     setDraft((current) => ({ ...current, status: "rolling_back", error: undefined }));
     try {
       await bridge.rollbackRepositoryPublish({
-        repositoryRoot: repoRoot,
+        repositoryRoot: getRepositoryRootForWrite(),
         transactionId: txId
       });
       setDraft((current) => updatePreview({
@@ -680,6 +686,7 @@ export function PublishFlow() {
             <PreCheckResult
               preCheck={draft.repository.preCheckResult}
               repoRootInfo={draft.repository.repositoryRootResult}
+              workspaceId={draft.preview.workspaceResult?.workspaceId}
               plannedChanges={draft.preview.workspacePlan?.plannedFiles ?? []}
               pendingProfiles={draft.archive.pendingProfileChanges}
               onConfirm={() => void applyWorkspace()}
@@ -779,20 +786,17 @@ export function PublishFlow() {
 
 // ─── Sub-Components ─────────────────────────────────────────────────────────
 
-function PreCheckResult({ preCheck, repoRootInfo, plannedChanges, pendingProfiles, onConfirm, onBack, onDiscard }: {
+export function PreCheckResult({ preCheck, repoRootInfo, workspaceId, plannedChanges, pendingProfiles, onConfirm, onBack, onDiscard }: {
   preCheck: PrePublishCheckResult;
   repoRootInfo?: RepositoryRootResult;
+  workspaceId?: string;
   plannedChanges: { type: string; path: string }[];
   pendingProfiles: ArchiveProfileChange[];
   onConfirm: () => void;
   onBack: () => void;
   onDiscard: () => void;
 }) {
-  const canWrite = preCheck.gitStatus.safeToPublish
-    && preCheck.workspaceStatus.passed
-    && preCheck.sourceFingerprintStatus.sourceUnchanged
-    && preCheck.targetConflicts.canProceed
-    && Boolean(repoRootInfo?.valid);
+  const eligibility = getPublishWriteEligibility({ preCheck, repositoryRootInfo: repoRootInfo, workspaceId });
 
   const createProfiles = pendingProfiles.filter((c): c is Extract<ArchiveProfileChange, { type: "create" }> => c.type === "create");
 
@@ -870,10 +874,26 @@ function PreCheckResult({ preCheck, repoRootInfo, plannedChanges, pendingProfile
       <div className="actions">
         <button className="secondary-button" type="button" onClick={onBack}>返回修改</button>
         <button className="secondary-button" type="button" onClick={onDiscard}>丢弃工作区</button>
-        <button className="primary-button" type="button" disabled={!canWrite} onClick={onConfirm}>
+        <button className="primary-button" type="button" disabled={!eligibility.allowed} onClick={onConfirm}>
           确认写入正式仓库
         </button>
       </div>
+      {!eligibility.allowed && (
+        <div className="eligibility-reasons" role="status" aria-live="polite">
+          <p className="muted-text">暂时无法写入：</p>
+          <ul>
+            {eligibility.reasons.map((reason) => (
+              <li key={reason}>{publishWriteBlockReasonText[reason]}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {import.meta.env.DEV && (
+        <details className="eligibility-diagnostics">
+          <summary>写入资格诊断</summary>
+          <pre>{JSON.stringify({ allowed: eligibility.allowed, ...eligibility.diagnostics, blockingReasons: eligibility.reasons }, null, 2)}</pre>
+        </details>
+      )}
     </div>
   );
 }
