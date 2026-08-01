@@ -63,3 +63,9 @@ cargo test --all-targets --all-features
 - Base64 图片仍阻止工作区生成；
 - 网络图片不会下载，只保留原始 URL；
 - 外部 AI 分类未接入。
+
+## Markdown 内容规范
+
+公开网站文章页会使用 Front Matter 的 `title` 作为页面标题。
+
+如果 Front Matter 已经包含 `title`，正文首个标题不建议再写重复的 `# H1`。网站渲染层会自动隐藏与页面标题重复或高度相似的首个 H1，以避免文章标题重复显示。

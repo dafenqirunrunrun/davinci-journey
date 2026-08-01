@@ -11,7 +11,7 @@ export function getStaticPaths() {
 }
 
 const { note } = Astro.props;
-const html = renderNoteHtml(note.body);
+const html = await renderNoteHtml(note.body, note.title);
 ---
 
 <BaseLayout title={note.title} description={note.description}>

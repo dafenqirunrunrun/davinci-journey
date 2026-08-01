@@ -226,6 +226,133 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
   .prose {
     max-width: 760px;
     margin: 0 auto;
+    color: var(--text);
+    font-size: 17px;
+    line-height: 1.82;
+  }
+
+  .prose > .meta:first-child {
+    margin-bottom: 10px;
+  }
+
+  .prose > h1:first-of-type {
+    max-width: 760px;
+    margin-bottom: 16px;
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.18;
+  }
+
+  .prose .lead {
+    margin-bottom: 18px;
+    font-size: 18px;
+    line-height: 1.72;
+  }
+
+  .prose h1,
+  .prose h2,
+  .prose h3 {
+    max-width: 760px;
+    letter-spacing: 0;
+  }
+
+  .prose h1 {
+    margin: 42px 0 16px;
+    font-size: 34px;
+    line-height: 1.24;
+  }
+
+  .prose h2 {
+    margin: 38px 0 14px;
+    font-size: 25px;
+    line-height: 1.32;
+  }
+
+  .prose h3 {
+    margin: 30px 0 12px;
+    font-size: 20px;
+    line-height: 1.4;
+  }
+
+  .prose p,
+  .prose ul,
+  .prose ol,
+  .prose blockquote,
+  .prose table,
+  .prose pre {
+    margin-bottom: 18px;
+  }
+
+  .prose ul,
+  .prose ol {
+    padding-left: 1.4em;
+  }
+
+  .prose li + li {
+    margin-top: 6px;
+  }
+
+  .prose blockquote {
+    margin-left: 0;
+    margin-right: 0;
+    border-left: 3px solid var(--accent);
+    color: var(--muted);
+    background: var(--surface);
+    border-radius: 0 12px 12px 0;
+    padding: 14px 18px;
+  }
+
+  .prose blockquote p:last-child {
+    margin-bottom: 0;
+  }
+
+  .prose table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 15px;
+  }
+
+  .prose th,
+  .prose td {
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .prose th {
+    background: var(--surface);
+    font-weight: 650;
+  }
+
+  .prose code {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 0.9em;
+    padding: 0.12em 0.38em;
+  }
+
+  .prose pre {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--surface);
+    padding: 16px;
+  }
+
+  .prose pre code {
+    border: 0;
+    background: transparent;
+    padding: 0;
+  }
+
+  .prose hr {
+    margin: 34px 0;
+    border: 0;
+    border-top: 1px solid var(--border);
   }
 
   .prose img {

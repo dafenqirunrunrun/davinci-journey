@@ -1,6 +1,12 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import rehypeStringify from "rehype-stringify";
+import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import remarkRehype from "remark-rehype";
+import { unified } from "unified";
+import { visit } from "unist-util-visit";
 import { parse } from "yaml";
 import { withBase } from "./site";
 
@@ -67,35 +73,68 @@ function extractTitle(body: string, fallback: string): string {
   return heading || fallback;
 }
 
-function escapeHtml(value: string): string {
+function normalizeTitle(value: string): string {
   return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+    .toLowerCase()
+    .replace(/（.*?）|\(.*?\)/g, "")
+    .replace(/学习|调用|笔记|原理|实践|指南|[0-9]/g, "")
+    .replace(/[^\p{Script=Han}a-z0-9]+/gu, "");
 }
 
-function safeUrl(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("/assets/notes/")) return withBase(trimmed);
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  if (/^mailto:/i.test(trimmed)) return trimmed;
-  if (/^[./a-z0-9_-]/i.test(trimmed) && !trimmed.includes("..")) return escapeHtml(trimmed);
-  return "#";
+export function isDuplicateTitleHeading(title: string, heading: string): boolean {
+  const normalizedTitle = normalizeTitle(title);
+  const normalizedHeading = normalizeTitle(heading);
+  if (!normalizedTitle || !normalizedHeading) return false;
+  if (normalizedTitle === normalizedHeading) return true;
+  if (normalizedTitle.includes(normalizedHeading) || normalizedHeading.includes(normalizedTitle)) return true;
+  const shorter = normalizedTitle.length < normalizedHeading.length ? normalizedTitle : normalizedHeading;
+  const longer = normalizedTitle.length < normalizedHeading.length ? normalizedHeading : normalizedTitle;
+  return shorter.length >= 8 && longer.includes(shorter);
 }
 
-function renderInline(markdown: string): string {
-  const escaped = escapeHtml(markdown);
-  return escaped
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;([^&]*)&quot;)?\)/g, (_match, alt: string, src: string, title: string | undefined) => {
-      const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-      return `<img src="${safeUrl(src)}" alt="${escapeHtml(alt)}"${titleAttr} loading="lazy" />`;
-    })
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, text: string, href: string) => {
-      return `<a href="${safeUrl(href)}" rel="noreferrer" target="_blank">${escapeHtml(text)}</a>`;
-    })
-    .replace(/`([^`]+)`/g, "<code>$1</code>");
+export function stripDuplicateTitleHeading(markdown: string, title: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstContentIndex < 0) return markdown;
+  const match = lines[firstContentIndex]?.match(/^#\s+(.+?)\s*$/);
+  if (!match || !isDuplicateTitleHeading(title, match[1] ?? "")) return markdown;
+  lines.splice(firstContentIndex, 1);
+  return lines.join("\n").replace(/^\s+/, "");
+}
+
+function stripMarkdownForSummary(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
+    .replace(/\[[^\]]+]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/[*_`~|[\]-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function extractDescription(body: string, title: string): string {
+  const text = stripMarkdownForSummary(stripDuplicateTitleHeading(body, title));
+  if (!text) return "暂无摘要。";
+  return text.length > 150 ? `${text.slice(0, 150)}...` : text;
+}
+
+function rehypeSafeLinksAndAssets() {
+  return (tree: Parameters<typeof visit>[0]) => {
+    visit(tree, "element", (node: { tagName?: string; properties?: Record<string, unknown> }) => {
+      if (node.tagName === "img") {
+        const src = typeof node.properties?.src === "string" ? node.properties.src : "";
+        if (src.startsWith("/assets/notes/")) node.properties = { ...node.properties, src: withBase(src) };
+        node.properties = { ...node.properties, loading: "lazy" };
+      }
+
+      if (node.tagName === "a") {
+        const href = typeof node.properties?.href === "string" ? node.properties.href : "";
+        if (/^https?:\/\//i.test(href)) node.properties = { ...node.properties, rel: "noreferrer", target: "_blank" };
+      }
+    });
+  };
 }
 
 export function getArchiveProfiles(): ArchiveProfile[] {
@@ -116,12 +155,13 @@ export function getNotes(): NoteEntry[] {
       const frontMatter = (match ? parse(match[1] ?? "") : {}) as NoteFrontMatter;
       const body = match ? raw.slice(match[0].length) : raw;
       const slug = frontMatter.slug || fallbackSlug(path);
+      const title = frontMatter.title || extractTitle(body, slug);
       const sourcePath = relative(rootDir, path).split(sep).join("/");
       const category = frontMatter.category || dirname(relative(contentDir, path)).split(sep)[0] || "Other";
       return {
         slug,
-        title: frontMatter.title || extractTitle(body, slug),
-        description: frontMatter.description || "这篇笔记尚未填写摘要。",
+        title,
+        description: typeof frontMatter.description === "string" && frontMatter.description.trim() ? frontMatter.description.trim() : extractDescription(body, title),
         category,
         topic: frontMatter.topic,
         tags: Array.isArray(frontMatter.tags) ? frontMatter.tags : [],
@@ -136,54 +176,16 @@ export function getNotes(): NoteEntry[] {
     .sort((a, b) => (b.updated || b.date || "").localeCompare(a.updated || a.date || ""));
 }
 
-export function renderNoteHtml(markdown: string): string {
-  const blocks: string[] = [];
-  let paragraph: string[] = [];
-  let codeBlock: string[] | undefined;
-
-  function flushParagraph() {
-    if (paragraph.length > 0) {
-      blocks.push(`<p>${renderInline(paragraph.join(" "))}</p>`);
-      paragraph = [];
-    }
-  }
-
-  for (const line of markdown.split(/\r?\n/)) {
-    if (line.startsWith("```")) {
-      if (codeBlock) {
-        blocks.push(`<pre><code>${escapeHtml(codeBlock.join("\n"))}</code></pre>`);
-        codeBlock = undefined;
-      } else {
-        flushParagraph();
-        codeBlock = [];
-      }
-      continue;
-    }
-
-    if (codeBlock) {
-      codeBlock.push(line);
-      continue;
-    }
-
-    if (!line.trim()) {
-      flushParagraph();
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
-    if (heading) {
-      flushParagraph();
-      const level = heading[1]?.length ?? 2;
-      blocks.push(`<h${level}>${renderInline(heading[2] ?? "")}</h${level}>`);
-      continue;
-    }
-
-    paragraph.push(line.trim());
-  }
-
-  flushParagraph();
-  if (codeBlock) blocks.push(`<pre><code>${escapeHtml(codeBlock.join("\n"))}</code></pre>`);
-  return blocks.join("\n");
+export async function renderNoteHtml(markdown: string, title: string): Promise<string> {
+  const content = stripDuplicateTitleHeading(markdown, title);
+  const file = await unified()
+    .use(remarkParse)
+    .use(remarkGfm)
+    .use(remarkRehype)
+    .use(rehypeSafeLinksAndAssets)
+    .use(rehypeStringify)
+    .process(content);
+  return String(file);
 }
 
 export function uniqueValues(values: Array<string | undefined>): string[] {
