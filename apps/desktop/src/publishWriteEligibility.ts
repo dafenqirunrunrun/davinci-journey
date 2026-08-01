@@ -25,6 +25,7 @@ export interface PublishWriteEligibility {
     workspaceValid: boolean;
     sourceChanged: boolean;
     targetConflictCount: number;
+    untrackedCount: number;
     unrelatedStagedCount: number;
     loading: boolean;
   };
@@ -66,7 +67,8 @@ export function getPublishWriteEligibility(input: PublishWriteEligibilityInput):
   const workspaceValid = Boolean(input.workspaceId && preCheck?.workspaceStatus.passed);
   const sourceChanged = Boolean(preCheck && !preCheck.sourceFingerprintStatus.sourceUnchanged);
   const targetConflictCount = preCheck && !preCheck.targetConflicts.canProceed ? Math.max(1, preCheck.targetConflicts.uncommittedFiles.length) : 0;
-  const unrelatedStagedCount = preCheck?.gitStatus.unrelatedUntrackedCount ?? 0;
+  const untrackedCount = preCheck?.gitStatus.untrackedFiles?.length ?? preCheck?.gitStatus.unrelatedUntrackedCount ?? 0;
+  const unrelatedStagedCount = preCheck?.gitStatus.unrelatedStagedFiles?.length ?? preCheck?.gitStatus.unrelatedStagedCount ?? 0;
   const gitOperationCount = preCheck?.gitStatus.operationsInProgress.length ?? 0;
   const loading = Boolean(input.loading);
 
@@ -79,7 +81,7 @@ export function getPublishWriteEligibility(input: PublishWriteEligibilityInput):
   if (targetConflictCount > 0) reasons.push("TARGET_CONFLICT");
   if (unrelatedStagedCount > 0) reasons.push("UNRELATED_STAGED_FILES");
   if (gitOperationCount > 0) reasons.push("GIT_OPERATION_IN_PROGRESS");
-  if (preCheck && !preCheck.gitStatus.safeToPublish && unrelatedStagedCount === 0 && gitOperationCount === 0) reasons.push("UNRELATED_STAGED_FILES");
+  if (preCheck && !preCheck.gitStatus.safeToPublish && unrelatedStagedCount === 0 && gitOperationCount === 0) reasons.push("GIT_OPERATION_IN_PROGRESS");
   if (loading) reasons.push("WRITE_IN_PROGRESS");
   if (input.alreadyWritten) reasons.push("ALREADY_WRITTEN");
 
@@ -95,6 +97,7 @@ export function getPublishWriteEligibility(input: PublishWriteEligibilityInput):
       workspaceValid,
       sourceChanged,
       targetConflictCount,
+      untrackedCount,
       unrelatedStagedCount,
       loading
     }
@@ -108,7 +111,7 @@ export const publishWriteBlockReasonText: Record<PublishWriteBlockReason, string
   WORKSPACE_INVALID: "发布工作区验证未通过。",
   SOURCE_CHANGED: "源 Markdown 或图片已变化，请重新生成工作区。",
   TARGET_CONFLICT: "目标文件存在未提交修改或冲突。",
-  UNRELATED_STAGED_FILES: "目标仓库存在无关文件状态，请先处理。",
+  UNRELATED_STAGED_FILES: "目标仓库存在无关已暂存文件，请先处理暂存区。",
   GIT_OPERATION_IN_PROGRESS: "目标仓库正在执行 Git 操作，请稍候。",
   PRECHECK_NOT_COMPLETED: "尚未完成写入前预检。",
   WRITE_IN_PROGRESS: "正在写入，请稍候。",

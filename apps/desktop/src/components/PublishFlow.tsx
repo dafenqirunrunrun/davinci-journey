@@ -821,6 +821,7 @@ export function PreCheckResult({ preCheck, repoRootInfo, workspaceId, plannedCha
           <span>HEAD：{preCheck.gitStatus.head.slice(0, 7)}</span>
           <span>安全发布：{preCheck.gitStatus.safeToPublish ? "✅" : "❌"}</span>
           <span>无关未跟踪文件：{preCheck.gitStatus.unrelatedUntrackedCount}</span>
+          <span>无关已暂存文件：{preCheck.gitStatus.unrelatedStagedCount}</span>
         </div>
         {preCheck.gitStatus.message && <p className="warning-text">{preCheck.gitStatus.message}</p>}
       </section>

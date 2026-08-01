@@ -140,6 +140,11 @@ export interface GitRepositoryStatusDto {
   detachedHead: boolean;
   operationsInProgress: string[];
   unrelatedUntrackedCount: number;
+  untrackedFiles: string[];
+  stagedFiles: string[];
+  unstagedTrackedFiles: string[];
+  unrelatedStagedFiles: string[];
+  unrelatedStagedCount: number;
   safeToPublish: boolean;
   message?: string;
 }

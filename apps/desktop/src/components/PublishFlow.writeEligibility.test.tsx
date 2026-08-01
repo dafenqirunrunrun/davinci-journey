@@ -13,6 +13,11 @@ function preCheck(overrides: Partial<PrePublishCheckResult> = {}): PrePublishChe
       detachedHead: false,
       operationsInProgress: [],
       unrelatedUntrackedCount: 0,
+      untrackedFiles: [],
+      stagedFiles: [],
+      unstagedTrackedFiles: [],
+      unrelatedStagedFiles: [],
+      unrelatedStagedCount: 0,
       safeToPublish: true
     },
     workspaceStatus: {
@@ -92,5 +97,23 @@ describe("PreCheckResult write eligibility interaction", () => {
 
     expect(onConfirm).not.toHaveBeenCalled();
     expect(screen.getByRole("status")).toHaveTextContent("目标仓库无效");
+  });
+  it("keeps the confirmation button enabled when only unrelated untracked files exist", () => {
+    const { container } = renderPreCheck({
+      preCheck: preCheck({
+        gitStatus: {
+          ...preCheck().gitStatus,
+          unrelatedUntrackedCount: 2,
+          untrackedFiles: ["private-a.md", "private-b.md"],
+          unrelatedStagedFiles: [],
+          unrelatedStagedCount: 0
+        }
+      })
+    });
+    const button = container.querySelector("button.primary-button");
+
+    expect(screen.getByText("无关未跟踪文件：2")).toBeInTheDocument();
+    expect(screen.getByText("无关已暂存文件：0")).toBeInTheDocument();
+    expect(button).not.toBeDisabled();
   });
 });

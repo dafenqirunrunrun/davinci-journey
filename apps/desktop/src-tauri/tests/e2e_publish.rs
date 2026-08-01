@@ -203,6 +203,249 @@ fn e2e_full_publish_workflow() {
 }
 
 #[test]
+fn e2e_unrelated_untracked_files_do_not_enter_stage_or_commit() {
+    let target = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    init_test_repo(target.path());
+
+    fs::write(target.path().join("private-a.md"), "# private a").unwrap();
+    fs::write(target.path().join("private-b.md"), "# private b").unwrap();
+
+    let source_md = source.path().join("note.md");
+    fs::write(&source_md, "# Source").unwrap();
+    let source_fingerprint = {
+        use sha2::Digest;
+        let bytes = fs::read(&source_md).unwrap();
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
+    let ws_id = uuid::Uuid::new_v4().to_string();
+    let ws_root = target.path().join(".publish-workspaces").join(&ws_id);
+    let ws_content = ws_root.join("content/ai-agent/langgraph");
+    fs::create_dir_all(&ws_content).unwrap();
+    fs::write(
+        ws_content.join("untracked-safe.md"),
+        "---\ntitle: Untracked Safe\narchiveProfile: ai-agent-langgraph\nslug: untracked-safe\n---\n\n# Safe",
+    )
+    .unwrap();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "workspaceId": ws_id,
+        "createdAt": "2026-08-01T00:00:00Z",
+        "sourceMarkdownPath": source_md.to_string_lossy().to_string(),
+        "targetMarkdownPath": "content/ai-agent/langgraph/untracked-safe.md",
+        "targetAssetDirectory": "public/assets/notes/untracked-safe",
+        "archiveProfileId": "ai-agent-langgraph",
+        "sourceFingerprint": source_fingerprint,
+        "plannedChanges": ["content/ai-agent/langgraph/untracked-safe.md"],
+        "assets": []
+    });
+    fs::write(
+        ws_root.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let precheck = pre_publish_check(PrePublishCheckRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        workspace_id: ws_id.clone(),
+    })
+    .expect("precheck with unrelated untracked files should pass");
+    assert_eq!(precheck.git_status.unrelated_untracked_count, 2);
+    assert_eq!(precheck.git_status.unrelated_staged_count, 0);
+    assert!(precheck.git_status.unrelated_staged_files.is_empty());
+    assert!(precheck.git_status.safe_to_publish);
+
+    let apply = davinci_journey_desktop::services::repository_publish::apply_publish_workspace(
+        ApplyWorkspaceRequest {
+            repository_root: target.path().to_string_lossy().to_string(),
+            workspace_id: ws_id,
+            operation: "create".to_string(),
+            archive_profile_changes: vec![],
+        },
+    )
+    .expect("apply should ignore unrelated untracked files");
+
+    let stage = stage_transaction(StageTransactionRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        transaction_id: apply.transaction_id.clone(),
+    })
+    .expect("stage should use explicit transaction paths only");
+    assert!(stage.can_commit);
+    assert!(!stage.staged_files.contains(&"private-a.md".to_string()));
+    assert!(!stage.staged_files.contains(&"private-b.md".to_string()));
+
+    let commit = commit_transaction(CommitTransactionRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        transaction_id: apply.transaction_id,
+        message: "docs(langgraph): add untracked safe note".to_string(),
+    })
+    .expect("commit should exclude unrelated untracked files");
+    assert!(!commit.committed_files.contains(&"private-a.md".to_string()));
+    assert!(!commit.committed_files.contains(&"private-b.md".to_string()));
+
+    let show = Command::new("git")
+        .args(["show", "--name-only", "--format=", "HEAD"])
+        .current_dir(target.path())
+        .output()
+        .unwrap();
+    let committed_paths = String::from_utf8_lossy(&show.stdout);
+    assert!(!committed_paths.contains("private-a.md"));
+    assert!(!committed_paths.contains("private-b.md"));
+}
+
+#[test]
+fn e2e_unrelated_staged_file_blocks_transaction_stage() {
+    let target = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    init_test_repo(target.path());
+
+    fs::write(target.path().join("staged-unrelated.md"), "# staged").unwrap();
+    Command::new("git")
+        .args(["add", "staged-unrelated.md"])
+        .current_dir(target.path())
+        .output()
+        .unwrap();
+
+    let source_md = source.path().join("note.md");
+    fs::write(&source_md, "# Source").unwrap();
+    let source_fingerprint = {
+        use sha2::Digest;
+        let bytes = fs::read(&source_md).unwrap();
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
+    let ws_id = uuid::Uuid::new_v4().to_string();
+    let ws_root = target.path().join(".publish-workspaces").join(&ws_id);
+    let ws_content = ws_root.join("content/ai-agent/langgraph");
+    fs::create_dir_all(&ws_content).unwrap();
+    fs::write(
+        ws_content.join("staged-block.md"),
+        "---\ntitle: Staged Block\narchiveProfile: ai-agent-langgraph\nslug: staged-block\n---\n\n# Block",
+    )
+    .unwrap();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "workspaceId": ws_id,
+        "createdAt": "2026-08-01T00:00:00Z",
+        "sourceMarkdownPath": source_md.to_string_lossy().to_string(),
+        "targetMarkdownPath": "content/ai-agent/langgraph/staged-block.md",
+        "targetAssetDirectory": "public/assets/notes/staged-block",
+        "archiveProfileId": "ai-agent-langgraph",
+        "sourceFingerprint": source_fingerprint,
+        "plannedChanges": ["content/ai-agent/langgraph/staged-block.md"],
+        "assets": []
+    });
+    fs::write(
+        ws_root.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let precheck = pre_publish_check(PrePublishCheckRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        workspace_id: ws_id.clone(),
+    })
+    .expect("precheck should report unrelated staged files");
+    assert_eq!(precheck.git_status.unrelated_staged_count, 1);
+    assert_eq!(
+        precheck.git_status.unrelated_staged_files,
+        vec!["staged-unrelated.md".to_string()]
+    );
+
+    let apply = davinci_journey_desktop::services::repository_publish::apply_publish_workspace(
+        ApplyWorkspaceRequest {
+            repository_root: target.path().to_string_lossy().to_string(),
+            workspace_id: ws_id,
+            operation: "create".to_string(),
+            archive_profile_changes: vec![],
+        },
+    )
+    .expect("apply still writes transaction workspace files");
+
+    let stage = stage_transaction(StageTransactionRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        transaction_id: apply.transaction_id,
+    })
+    .expect("stage should return a blocking result");
+    assert!(!stage.can_commit);
+    assert!(stage.has_unrelated_staged);
+    assert_eq!(
+        stage.unrelated_files,
+        vec!["staged-unrelated.md".to_string()]
+    );
+}
+
+#[test]
+fn e2e_target_file_uncommitted_change_still_blocks_precheck() {
+    let target = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    init_test_repo(target.path());
+
+    let target_md = target.path().join("content/ai-agent/langgraph/conflict.md");
+    fs::create_dir_all(target_md.parent().unwrap()).unwrap();
+    fs::write(&target_md, "# Existing").unwrap();
+    Command::new("git")
+        .args(["add", "content/ai-agent/langgraph/conflict.md"])
+        .current_dir(target.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "docs(langgraph): add existing conflict"])
+        .current_dir(target.path())
+        .output()
+        .unwrap();
+    fs::write(&target_md, "# User change").unwrap();
+
+    let source_md = source.path().join("note.md");
+    fs::write(&source_md, "# Source").unwrap();
+    let source_fingerprint = {
+        use sha2::Digest;
+        let bytes = fs::read(&source_md).unwrap();
+        format!("{:x}", sha2::Sha256::digest(&bytes))
+    };
+
+    let ws_id = uuid::Uuid::new_v4().to_string();
+    let ws_root = target.path().join(".publish-workspaces").join(&ws_id);
+    let ws_content = ws_root.join("content/ai-agent/langgraph");
+    fs::create_dir_all(&ws_content).unwrap();
+    fs::write(
+        ws_content.join("conflict.md"),
+        "---\ntitle: Conflict\narchiveProfile: ai-agent-langgraph\nslug: conflict\n---\n\n# Conflict",
+    )
+    .unwrap();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "workspaceId": ws_id,
+        "createdAt": "2026-08-01T00:00:00Z",
+        "sourceMarkdownPath": source_md.to_string_lossy().to_string(),
+        "targetMarkdownPath": "content/ai-agent/langgraph/conflict.md",
+        "targetAssetDirectory": "public/assets/notes/conflict",
+        "archiveProfileId": "ai-agent-langgraph",
+        "sourceFingerprint": source_fingerprint,
+        "plannedChanges": ["content/ai-agent/langgraph/conflict.md"],
+        "assets": []
+    });
+    fs::write(
+        ws_root.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let precheck = pre_publish_check(PrePublishCheckRequest {
+        repository_root: target.path().to_string_lossy().to_string(),
+        workspace_id: ws_id,
+    })
+    .expect("precheck should return conflict details");
+
+    assert!(!precheck.target_conflicts.can_proceed);
+    assert!(precheck
+        .target_conflicts
+        .uncommitted_files
+        .contains(&"content/ai-agent/langgraph/conflict.md".to_string()));
+}
+
+#[test]
 fn e2e_external_source_git_writes_only_to_explicit_target_repo() {
     let target = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();

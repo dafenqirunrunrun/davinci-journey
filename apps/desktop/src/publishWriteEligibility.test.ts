@@ -11,6 +11,11 @@ function preCheck(overrides: Partial<PrePublishCheckResult> = {}): PrePublishChe
       detachedHead: false,
       operationsInProgress: [],
       unrelatedUntrackedCount: 0,
+      untrackedFiles: [],
+      stagedFiles: [],
+      unstagedTrackedFiles: [],
+      unrelatedStagedFiles: [],
+      unrelatedStagedCount: 0,
       safeToPublish: true
     },
     workspaceStatus: {
@@ -113,9 +118,36 @@ describe("getPublishWriteEligibility", () => {
     expect(result.reasons).toContain("TARGET_CONFLICT");
   });
 
-  it("disables writing when unrelated repository files are reported", () => {
+  it("allows writing when unrelated untracked files are reported", () => {
     const result = getPublishWriteEligibility({
-      preCheck: preCheck({ gitStatus: { ...preCheck().gitStatus, unrelatedUntrackedCount: 1, safeToPublish: false } }),
+      preCheck: preCheck({
+        gitStatus: {
+          ...preCheck().gitStatus,
+          unrelatedUntrackedCount: 2,
+          untrackedFiles: ["private-a.md", "private-b.md"],
+          safeToPublish: true
+        }
+      }),
+      repositoryRootInfo: repo(),
+      workspaceId: "workspace-1"
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.diagnostics.untrackedCount).toBe(2);
+    expect(result.diagnostics.unrelatedStagedCount).toBe(0);
+    expect(result.reasons).not.toContain("UNRELATED_STAGED_FILES");
+  });
+
+  it("disables writing only when unrelated staged files are reported", () => {
+    const result = getPublishWriteEligibility({
+      preCheck: preCheck({
+        gitStatus: {
+          ...preCheck().gitStatus,
+          stagedFiles: ["content/unrelated.md"],
+          unrelatedStagedFiles: ["content/unrelated.md"],
+          unrelatedStagedCount: 1
+        }
+      }),
       repositoryRootInfo: repo(),
       workspaceId: "workspace-1"
     });

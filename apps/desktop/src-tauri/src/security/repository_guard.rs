@@ -16,6 +16,10 @@ pub struct GitRepositoryStatus {
     pub tracked_changes: Vec<GitChange>,
     /// Untracked files (names only, no content).
     pub untracked_files: Vec<String>,
+    /// Files currently staged in the Git index.
+    pub staged_files: Vec<String>,
+    /// Tracked files with unstaged working tree changes.
+    pub unstaged_tracked_files: Vec<String>,
 }
 
 /// A single git change entry (parsed from `git status --porcelain`).
@@ -24,6 +28,16 @@ pub struct GitChange {
     pub staged: String,
     pub unstaged: String,
     pub path: String,
+}
+
+impl GitChange {
+    pub fn is_staged(&self) -> bool {
+        self.staged != " " && self.staged != "?"
+    }
+
+    pub fn is_unstaged_tracked(&self) -> bool {
+        self.unstaged != " " && self.unstaged != "?"
+    }
 }
 
 /// Check that `dir` is inside a git repository and return its root.
@@ -140,6 +154,16 @@ pub fn inspect_repository(repo_root: &Path) -> Result<GitRepositoryStatus, Strin
     let detached = branch.is_none();
     let (merge, rebase, cherry, bisect) = check_operations_in_progress(&root);
     let (changes, untracked) = parse_status(&root)?;
+    let staged_files = changes
+        .iter()
+        .filter(|change| change.is_staged())
+        .map(|change| change.path.clone())
+        .collect();
+    let unstaged_tracked_files = changes
+        .iter()
+        .filter(|change| change.is_unstaged_tracked())
+        .map(|change| change.path.clone())
+        .collect();
 
     Ok(GitRepositoryStatus {
         repository_root: root,
@@ -152,6 +176,8 @@ pub fn inspect_repository(repo_root: &Path) -> Result<GitRepositoryStatus, Strin
         bisect_in_progress: bisect,
         tracked_changes: changes,
         untracked_files: untracked,
+        staged_files,
+        unstaged_tracked_files,
     })
 }
 
@@ -423,6 +449,41 @@ mod tests {
 
         assert!(changes.is_empty());
         assert!(untracked.is_empty());
+    }
+
+    #[test]
+    fn separates_untracked_staged_and_unstaged_tracked_files() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join("tracked.md"), "initial").unwrap();
+        Command::new("git")
+            .args(["add", "tracked.md"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        fs::write(dir.path().join("private.md"), "untracked").unwrap();
+        fs::write(dir.path().join("staged.md"), "staged").unwrap();
+        Command::new("git")
+            .args(["add", "staged.md"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        fs::write(dir.path().join("tracked.md"), "changed").unwrap();
+
+        let status = inspect_repository(dir.path()).unwrap();
+
+        assert!(status.untracked_files.contains(&"private.md".to_string()));
+        assert!(!status.staged_files.contains(&"private.md".to_string()));
+        assert!(status.staged_files.contains(&"staged.md".to_string()));
+        assert!(status
+            .unstaged_tracked_files
+            .contains(&"tracked.md".to_string()));
     }
 
     #[test]

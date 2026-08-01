@@ -63,6 +63,11 @@ pub struct GitRepositoryStatusDto {
     pub detached_head: bool,
     pub operations_in_progress: Vec<String>,
     pub unrelated_untracked_count: usize,
+    pub untracked_files: Vec<String>,
+    pub staged_files: Vec<String>,
+    pub unstaged_tracked_files: Vec<String>,
+    pub unrelated_staged_files: Vec<String>,
+    pub unrelated_staged_count: usize,
     pub safe_to_publish: bool,
     pub message: Option<String>,
 }
@@ -249,6 +254,11 @@ pub fn pre_publish_check(request: PrePublishCheckRequest) -> Result<PrePublishCh
         detached_head: repo_status.detached_head,
         operations_in_progress: ops_in_progress,
         unrelated_untracked_count: repo_status.untracked_files.len(),
+        untracked_files: repo_status.untracked_files,
+        staged_files: repo_status.staged_files.clone(),
+        unstaged_tracked_files: repo_status.unstaged_tracked_files,
+        unrelated_staged_count: repo_status.staged_files.len(),
+        unrelated_staged_files: repo_status.staged_files,
         safe_to_publish,
         message: git_message,
     };
