@@ -51,10 +51,11 @@ fn init_test_repo(dir: &Path) {
 
 use davinci_journey_desktop::security::repository_guard::inspect_repository;
 use davinci_journey_desktop::services::repository_publish::{
-    commit_transaction, pre_publish_check, stage_transaction, ApplyWorkspaceRequest,
-    CommitTransactionRequest, PrePublishCheckRequest, RollbackPublishRequest,
-    StageTransactionRequest,
+    cleanup_publish_lock, commit_transaction, inspect_publish_lock, pre_publish_check,
+    stage_transaction, ApplyWorkspaceRequest, CleanupPublishLockRequest, CommitTransactionRequest,
+    PrePublishCheckRequest, RollbackPublishRequest, StageTransactionRequest,
 };
+use davinci_journey_desktop::services::repository_transaction::PublishLockState;
 
 #[test]
 fn e2e_git_repository_status() {
@@ -159,6 +160,12 @@ fn e2e_full_publish_workflow() {
     assert!(target.exists(), "Target markdown should exist");
     let written = fs::read_to_string(&target).unwrap();
     assert!(written.contains("E2E Test Article"), "Content should match");
+    let lock_after_write = inspect_publish_lock(&dir.path().to_string_lossy()).unwrap();
+    assert_eq!(lock_after_write.state, PublishLockState::Active);
+    assert_eq!(
+        lock_after_write.transaction_id.as_deref(),
+        Some(apply.transaction_id.as_str())
+    );
 
     // Stage the file
     let stage_result = stage_transaction(StageTransactionRequest {
@@ -188,6 +195,8 @@ fn e2e_full_publish_workflow() {
     let commit = commit_result.unwrap();
     assert!(!commit.commit_hash.is_empty(), "Commit hash should exist");
     assert_eq!(commit.branch, "master", "Should commit to master");
+    let lock_after_commit = inspect_publish_lock(&dir.path().to_string_lossy()).unwrap();
+    assert_eq!(lock_after_commit.state, PublishLockState::Missing);
 
     // Verify commit with git log
     let log = Command::new("git")
@@ -616,13 +625,46 @@ fn e2e_rollback_test() {
     );
 
     if let Ok(apply) = result {
+        let lock_after_write = inspect_publish_lock(&dir.path().to_string_lossy()).unwrap();
+        assert_eq!(lock_after_write.state, PublishLockState::Active);
         // Rollback
         let rollback = davinci_journey_desktop::services::repository_publish::rollback_publish(
             RollbackPublishRequest {
                 repository_root: dir.path().to_string_lossy().to_string(),
-                transaction_id: apply.transaction_id,
+                transaction_id: apply.transaction_id.clone(),
             },
         );
         assert!(rollback.is_ok(), "Should rollback: {:?}", rollback.err());
+        let lock_after_rollback = inspect_publish_lock(&dir.path().to_string_lossy()).unwrap();
+        assert_eq!(lock_after_rollback.state, PublishLockState::Missing);
     }
+}
+
+#[test]
+fn e2e_stale_publish_lock_can_be_cleaned_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    init_test_repo(dir.path());
+    fs::write(dir.path().join("private.md"), "# private").unwrap();
+    fs::write(
+        dir.path().join(".publish.lock"),
+        serde_json::json!({
+            "transaction_id": "stale-smoke-test",
+            "process_id": u32::MAX,
+            "created_at": "2026-08-01T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = inspect_publish_lock(&dir.path().to_string_lossy()).unwrap();
+    assert_eq!(status.state, PublishLockState::Stale);
+
+    let cleaned = cleanup_publish_lock(CleanupPublishLockRequest {
+        repository_root: dir.path().to_string_lossy().to_string(),
+        transaction_id: Some("stale-smoke-test".to_string()),
+    })
+    .unwrap();
+
+    assert_eq!(cleaned.state, PublishLockState::Missing);
+    assert!(dir.path().join("private.md").exists());
 }

@@ -12,7 +12,7 @@ import {
 } from "@davinci-journey/classification";
 import { parseMarkdown } from "@davinci-journey/markdown-core";
 import { initialArchiveProfiles } from "../archiveProfiles";
-import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
+import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type PublishLockStatus, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
 import { getPublishWriteEligibility, publishWriteBlockReasonText } from "../publishWriteEligibility";
 
@@ -120,6 +120,7 @@ export function PublishFlow() {
   const [search, setSearch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [repositoryTarget, setRepositoryTarget] = useState<RepositoryRootResult | undefined>();
+  const [publishLock, setPublishLock] = useState<PublishLockStatus | undefined>();
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingFilePicker = useRef<((file?: File) => void) | undefined>();
 
@@ -159,6 +160,11 @@ export function PublishFlow() {
       .then((result) => {
         if (!active || !result) return;
         setRepositoryTarget(result);
+        if (result.repositoryRoot) {
+          void bridge.inspectPublishLock(result.repositoryRoot).then((lock) => {
+            if (active) setPublishLock(lock);
+          }).catch(() => undefined);
+        }
         setDraft((current) => ({
           ...current,
           repository: { ...current.repository, repositoryRootResult: result }
@@ -238,12 +244,29 @@ export function PublishFlow() {
 
   function rememberRepositoryTarget(result: RepositoryRootResult, options: { preserveWorkspace?: boolean } = {}) {
     setRepositoryTarget(result);
+    if (result.repositoryRoot) {
+      void bridge.inspectPublishLock(result.repositoryRoot).then(setPublishLock).catch(() => setPublishLock(undefined));
+    } else {
+      setPublishLock(undefined);
+    }
     setDraft((current) => ({
       ...current,
       preview: options.preserveWorkspace ? current.preview : { ...current.preview, workspaceResult: undefined },
       repository: { ...current.repository, repositoryRootResult: result },
       error: result.valid ? undefined : result.message ?? result.errors[0]
     }));
+  }
+
+  async function refreshPublishLock(repositoryRoot = repoRoot) {
+    if (!repositoryRoot) {
+      setPublishLock(undefined);
+      return;
+    }
+    try {
+      setPublishLock(await bridge.inspectPublishLock(repositoryRoot));
+    } catch {
+      setPublishLock(undefined);
+    }
   }
 
   async function chooseRepositoryTarget() {
@@ -320,6 +343,7 @@ export function PublishFlow() {
       }
       const verifiedTarget = await bridge.validateRepositoryRoot(repoRoot);
       rememberRepositoryTarget(verifiedTarget, { preserveWorkspace: true });
+      await refreshPublishLock(verifiedTarget.repositoryRoot);
       if (!verifiedTarget.valid) {
         setDraft((current) => ({
           ...current,
@@ -387,6 +411,7 @@ export function PublishFlow() {
       setCommitMessage(`docs(${topic}): add ${slug} with assets`);
     } catch (error) {
       setDraft((current) => ({ ...current, status: "write_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "write" } }));
+      await refreshPublishLock(writeRepositoryRoot);
     }
   }
 
@@ -453,8 +478,10 @@ export function PublishFlow() {
         status: "committed",
         repository: { ...current.repository, commitResult, failedStage: undefined }
       }));
+      await refreshPublishLock(getRepositoryRootForWrite());
     } catch (error) {
       setDraft((current) => ({ ...current, status: "commit_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "commit" } }));
+      await refreshPublishLock(getRepositoryRootForWrite());
     }
   }
 
@@ -473,8 +500,25 @@ export function PublishFlow() {
         repository: {},
         preview: { ...current.preview, workspaceResult: undefined }
       }, profiles));
+      await refreshPublishLock(getRepositoryRootForWrite());
     } catch (error) {
       setDraft((current) => ({ ...current, status: "written", error: desktopErrorMessage(error) }));
+      await refreshPublishLock(getRepositoryRootForWrite());
+    }
+  }
+
+  async function cleanupStaleLock() {
+    const repositoryRoot = repositoryTarget?.repositoryRoot || repoRoot;
+    if (!repositoryRoot || publishLock?.state !== "stale") return;
+    try {
+      const result = await bridge.cleanupStalePublishLock({
+        repositoryRoot,
+        transactionId: publishLock.transactionId
+      });
+      setPublishLock(result);
+    } catch (error) {
+      setDraft((current) => ({ ...current, error: desktopErrorMessage(error) }));
+      await refreshPublishLock(repositoryRoot);
     }
   }
 
@@ -499,8 +543,10 @@ export function PublishFlow() {
           </p>
           <RepositoryTargetPanel
             target={repositoryTarget}
+            publishLock={publishLock}
             onChoose={() => void chooseRepositoryTarget()}
             onRevalidate={() => void revalidateRepositoryTarget()}
+            onCleanupStaleLock={() => void cleanupStaleLock()}
           />
           <input ref={inputRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown" onChange={(event) => void handleBrowserInput(event.target.files?.[0])} />
           <button className="primary-button" type="button" onClick={() => void selectMarkdown()}>
@@ -630,8 +676,10 @@ export function PublishFlow() {
           <PathBlock title="源 Markdown" value={draft.source.markdownFile?.absolutePath || draft.source.markdownFile?.fileName || "未选择"} />
           <RepositoryTargetPanel
             target={repositoryTarget}
+            publishLock={publishLock}
             onChoose={() => void chooseRepositoryTarget()}
             onRevalidate={() => void revalidateRepositoryTarget()}
+            onCleanupStaleLock={() => void cleanupStaleLock()}
           />
           <PathBlock title="最终 Markdown 路径" value={draft.preview.markdownPath ?? ""} />
           <PathBlock title="最终图片目录" value={draft.preview.assetDirectory ?? ""} />
@@ -899,12 +947,15 @@ export function PreCheckResult({ preCheck, repoRootInfo, workspaceId, plannedCha
   );
 }
 
-function RepositoryTargetPanel({ target, onChoose, onRevalidate }: {
+export function RepositoryTargetPanel({ target, publishLock, onChoose, onRevalidate, onCleanupStaleLock }: {
   target?: RepositoryRootResult;
+  publishLock?: PublishLockStatus;
   onChoose: () => void;
   onRevalidate: () => void;
+  onCleanupStaleLock: () => void;
 }) {
   const valid = Boolean(target?.valid);
+  const hasLockWarning = Boolean(publishLock && publishLock.state !== "missing");
   return (
     <section className="write-section" aria-label="目标网站仓库">
       <div className="section-title">
@@ -937,6 +988,30 @@ function RepositoryTargetPanel({ target, onChoose, onRevalidate }: {
           {target.errors.map((error) => (
             <span className="check-fail" key={error}>{error}</span>
           ))}
+        </div>
+      )}
+      {hasLockWarning && (
+        <div className="validation-list" role="status" aria-live="polite">
+          {publishLock?.state === "stale" && (
+            <>
+              <span className="warning-text">检测到上次异常结束留下的发布锁。</span>
+              {publishLock.transactionId && <code>{publishLock.transactionId}</code>}
+              <div className="actions compact-actions">
+                <button className="secondary-button" type="button" onClick={onCleanupStaleLock}>
+                  清理失效锁
+                </button>
+                <button className="secondary-button" type="button" onClick={onRevalidate}>
+                  重新检查
+                </button>
+              </div>
+            </>
+          )}
+          {publishLock?.state === "active" && (
+            <span className="warning-text">另一个发布流程正在进行中，请等待完成后重新检查。</span>
+          )}
+          {publishLock?.state === "invalid" && (
+            <span className="error-message">发布锁文件损坏，请检查后再继续。</span>
+          )}
         </div>
       )}
     </section>

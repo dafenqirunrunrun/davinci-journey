@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { PrePublishCheckResult, RepositoryRootResult } from "../desktopBridge";
-import { PreCheckResult } from "./PublishFlow";
+import { PreCheckResult, RepositoryTargetPanel } from "./PublishFlow";
 
 function preCheck(overrides: Partial<PrePublishCheckResult> = {}): PrePublishCheckResult {
   return {
@@ -115,5 +115,73 @@ describe("PreCheckResult write eligibility interaction", () => {
     expect(screen.getByText("无关未跟踪文件：2")).toBeInTheDocument();
     expect(screen.getByText("无关已暂存文件：0")).toBeInTheDocument();
     expect(button).not.toBeDisabled();
+  });
+});
+
+describe("RepositoryTargetPanel publish lock recovery", () => {
+  it("shows a cleanup entry for stale publish locks", () => {
+    const onCleanup = vi.fn();
+    render(
+      <RepositoryTargetPanel
+        target={repo()}
+        publishLock={{
+          state: "stale",
+          lockPath: "C:/site/.publish.lock",
+          transactionId: "tx-stale",
+          processId: 999999
+        }}
+        onChoose={vi.fn()}
+        onRevalidate={vi.fn()}
+        onCleanupStaleLock={onCleanup}
+      />
+    );
+
+    expect(screen.getByText("检测到上次异常结束留下的发布锁。")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("清理失效锁"));
+    expect(onCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows stale lock cleanup even when repository structure is invalid", () => {
+    render(
+      <RepositoryTargetPanel
+        target={repo({
+          valid: false,
+          message: "目标网站仓库结构不完整，请选择正确的仓库根目录。",
+          errors: ["目标仓库缺少 content/ 目录。"]
+        })}
+        publishLock={{
+          state: "stale",
+          lockPath: "C:/site/.publish.lock",
+          transactionId: "tx-stale"
+        }}
+        onChoose={vi.fn()}
+        onRevalidate={vi.fn()}
+        onCleanupStaleLock={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("目标网站仓库结构不完整，请选择正确的仓库根目录。")).toBeInTheDocument();
+    expect(screen.getByText("检测到上次异常结束留下的发布锁。")).toBeInTheDocument();
+    expect(screen.getByText("清理失效锁")).toBeInTheDocument();
+  });
+
+  it("blocks cleanup entry for active publish locks", () => {
+    render(
+      <RepositoryTargetPanel
+        target={repo()}
+        publishLock={{
+          state: "active",
+          lockPath: "C:/site/.publish.lock",
+          transactionId: "tx-active",
+          processId: 123
+        }}
+        onChoose={vi.fn()}
+        onRevalidate={vi.fn()}
+        onCleanupStaleLock={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("另一个发布流程正在进行中，请等待完成后重新检查。")).toBeInTheDocument();
+    expect(screen.queryByText("清理失效锁")).not.toBeInTheDocument();
   });
 });

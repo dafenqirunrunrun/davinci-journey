@@ -34,6 +34,10 @@ export type DesktopCommandErrorCode =
   | "PUBLISH_SOURCE_CHANGED"
   | "PUBLISH_TARGET_CONFLICT"
   | "PUBLISH_LOCK_EXISTS"
+  | "PUBLISH_LOCK_STALE"
+  | "PUBLISH_LOCK_ACTIVE"
+  | "PUBLISH_LOCK_RELEASE_FAILED"
+  | "PUBLISH_LOCK_OWNERSHIP_MISMATCH"
   | "PUBLISH_TRANSACTION_FAILED"
   | "PUBLISH_ROLLBACK_FAILED"
   | "ARCHIVE_CONFIG_CHANGED"
@@ -282,6 +286,22 @@ export interface RollbackPublishRequest {
   transactionId: string;
 }
 
+export type PublishLockState = "missing" | "active" | "stale" | "invalid";
+
+export interface PublishLockStatus {
+  state: PublishLockState;
+  lockPath: string;
+  transactionId?: string;
+  processId?: number;
+  createdAt?: string;
+  message?: string;
+}
+
+export interface CleanupPublishLockRequest {
+  repositoryRoot: string;
+  transactionId?: string;
+}
+
 export interface DesktopBridge {
   mode: "tauri" | "browser";
   selectMarkdownFile(request?: SelectMarkdownFileRequest): Promise<SelectedMarkdownFileDto>;
@@ -296,6 +316,8 @@ export interface DesktopBridge {
   stagePublishTransaction(request: StageTransactionRequest): Promise<StageTransactionResult>;
   commitPublishTransaction(request: CommitTransactionRequest): Promise<CommitTransactionResult>;
   rollbackRepositoryPublish(request: RollbackPublishRequest): Promise<void>;
+  inspectPublishLock(repositoryRoot: string): Promise<PublishLockStatus>;
+  cleanupStalePublishLock(request: CleanupPublishLockRequest): Promise<PublishLockStatus>;
   resolveRepositoryRoot(request: string): Promise<RepositoryRootResult>;
   selectRepositoryRoot(): Promise<RepositoryRootResult>;
   validateRepositoryRoot(repositoryRoot: string): Promise<RepositoryRootResult>;
@@ -335,6 +357,10 @@ const errorMessages: Record<DesktopCommandErrorCode, string> = {
   PUBLISH_SOURCE_CHANGED: "源文件在工作区生成后发生了变化，请重新生成发布工作区。",
   PUBLISH_TARGET_CONFLICT: "目标文件冲突，无法自动覆盖。",
   PUBLISH_LOCK_EXISTS: "另一个发布流程正在进行中，请等待完成。",
+  PUBLISH_LOCK_STALE: "检测到上次异常结束留下的发布锁，请确认后清理失效锁。",
+  PUBLISH_LOCK_ACTIVE: "另一个发布流程正在进行中，请等待完成。",
+  PUBLISH_LOCK_RELEASE_FAILED: "发布锁释放失败，请重新检查后再继续。",
+  PUBLISH_LOCK_OWNERSHIP_MISMATCH: "发布锁不属于当前事务，已阻止清理。",
   PUBLISH_TRANSACTION_FAILED: "发布事务执行失败。",
   PUBLISH_ROLLBACK_FAILED: "发布回滚失败，可能需要手动处理。",
   ARCHIVE_CONFIG_CHANGED: "归档配置在工作区生成后已发生变化，请重新生成。",
@@ -480,6 +506,12 @@ export function createBrowserBridge(filePicker: () => Promise<File | undefined>)
     async rollbackRepositoryPublish() {
       throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持仓库写入操作。");
     },
+    async inspectPublishLock() {
+      return { state: "missing", lockPath: "" };
+    },
+    async cleanupStalePublishLock() {
+      return { state: "missing", lockPath: "" };
+    },
     async resolveRepositoryRoot() {
       throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持仓库写入操作。");
     },
@@ -516,6 +548,8 @@ export function createTauriBridge(): DesktopBridge {
     stagePublishTransaction: (request) => invokeTauri("stage_publish_transaction", { request }),
     commitPublishTransaction: (request) => invokeTauri("commit_publish_transaction", { request }),
     rollbackRepositoryPublish: (request) => invokeTauri("rollback_repository_publish", { request }),
+    inspectPublishLock: (repositoryRoot) => invokeTauri("inspect_publish_lock_command", { repositoryRoot }),
+    cleanupStalePublishLock: (request) => invokeTauri("cleanup_stale_publish_lock_command", { request }),
     resolveRepositoryRoot: (request) => invokeTauri("resolve_repository_root_command", { request }),
     selectRepositoryRoot: () => invokeTauri("select_repository_root"),
     validateRepositoryRoot: (repositoryRoot) => invokeTauri("validate_repository_root_command", { repositoryRoot }),

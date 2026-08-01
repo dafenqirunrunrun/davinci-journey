@@ -16,10 +16,12 @@ pub mod services;
 use security::repository_guard::{validate_repository_root, RepositoryRootResult};
 use services::repository_publish::{
     apply_publish_workspace, commit_transaction, pre_publish_check, rollback_publish,
-    stage_transaction, ApplyWorkspaceRequest, ApplyWorkspaceResult, CommitTransactionRequest,
-    CommitTransactionResult, GetPublishDiffRequest, PrePublishCheckRequest, PrePublishCheckResult,
-    PublishDiffResult, RollbackPublishRequest, StageTransactionRequest, StageTransactionResult,
+    stage_transaction, ApplyWorkspaceRequest, ApplyWorkspaceResult, CleanupPublishLockRequest,
+    CommitTransactionRequest, CommitTransactionResult, GetPublishDiffRequest,
+    PrePublishCheckRequest, PrePublishCheckResult, PublishDiffResult, RollbackPublishRequest,
+    StageTransactionRequest, StageTransactionResult,
 };
+use services::repository_transaction::PublishLockStatus;
 
 const MAX_MARKDOWN_SIZE: u64 = 10 * 1024 * 1024;
 const WORKSPACE_VERSION: u8 = 1;
@@ -59,6 +61,10 @@ pub enum DesktopCommandError {
     PublishSourceChanged,
     PublishTargetConflict,
     PublishLockExists,
+    PublishLockStale,
+    PublishLockActive,
+    PublishLockReleaseFailed,
+    PublishLockOwnershipMismatch,
     PublishTransactionFailed,
     PublishRollbackFailed,
     ArchiveConfigChanged,
@@ -102,6 +108,10 @@ impl DesktopCommandError {
             Self::PublishSourceChanged => "PUBLISH_SOURCE_CHANGED",
             Self::PublishTargetConflict => "PUBLISH_TARGET_CONFLICT",
             Self::PublishLockExists => "PUBLISH_LOCK_EXISTS",
+            Self::PublishLockStale => "PUBLISH_LOCK_STALE",
+            Self::PublishLockActive => "PUBLISH_LOCK_ACTIVE",
+            Self::PublishLockReleaseFailed => "PUBLISH_LOCK_RELEASE_FAILED",
+            Self::PublishLockOwnershipMismatch => "PUBLISH_LOCK_OWNERSHIP_MISMATCH",
             Self::PublishTransactionFailed => "PUBLISH_TRANSACTION_FAILED",
             Self::PublishRollbackFailed => "PUBLISH_ROLLBACK_FAILED",
             Self::ArchiveConfigChanged => "ARCHIVE_CONFIG_CHANGED",
@@ -151,6 +161,10 @@ impl DesktopCommandError {
             Self::PublishSourceChanged => "源文件在工作区生成后发生了变化，请重新生成发布工作区。",
             Self::PublishTargetConflict => "目标文件冲突，无法自动覆盖。",
             Self::PublishLockExists => "另一个发布流程正在进行中，请等待完成。",
+            Self::PublishLockStale => "检测到上次异常结束留下的发布锁，请确认后清理失效锁。",
+            Self::PublishLockActive => "另一个发布流程正在进行中，请等待完成。",
+            Self::PublishLockReleaseFailed => "发布锁释放失败，请重新检查后再继续。",
+            Self::PublishLockOwnershipMismatch => "发布锁不属于当前事务，已阻止清理。",
             Self::PublishTransactionFailed => "发布事务执行失败。",
             Self::PublishRollbackFailed => "发布回滚失败，可能需要手动处理。",
             Self::ArchiveConfigChanged => "归档配置在工作区生成后已发生变化，请重新生成。",
@@ -595,6 +609,42 @@ fn rollback_repository_publish(request: RollbackPublishRequest) -> CommandResult
     })
 }
 
+#[tauri::command]
+fn inspect_publish_lock_command(repository_root: String) -> CommandResult<PublishLockStatus> {
+    services::repository_publish::inspect_publish_lock(&repository_root).map_err(|e| {
+        CommandErrorDto {
+            code: "PUBLISH_LOCK_INSPECT_FAILED".to_string(),
+            message: e,
+            technical_message: None,
+            affected_path: None,
+            recoverable: true,
+        }
+    })
+}
+
+#[tauri::command]
+fn cleanup_stale_publish_lock_command(
+    request: CleanupPublishLockRequest,
+) -> CommandResult<PublishLockStatus> {
+    services::repository_publish::cleanup_publish_lock(request).map_err(|e| CommandErrorDto {
+        code: if e.contains("PUBLISH_LOCK_ACTIVE") {
+            DesktopCommandError::PublishLockActive.code().to_string()
+        } else if e.contains("PUBLISH_LOCK_OWNERSHIP_MISMATCH") {
+            DesktopCommandError::PublishLockOwnershipMismatch
+                .code()
+                .to_string()
+        } else {
+            DesktopCommandError::PublishLockReleaseFailed
+                .code()
+                .to_string()
+        },
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -613,6 +663,8 @@ pub fn run() {
             stage_publish_transaction,
             commit_publish_transaction,
             rollback_repository_publish,
+            inspect_publish_lock_command,
+            cleanup_stale_publish_lock_command,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run desktop app");

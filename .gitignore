@@ -12,5 +12,6 @@ tauri-*.png
 publish-workspaces/
 /.publish-workspaces/
 /.publish-transactions/
+/.publish.lock
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/

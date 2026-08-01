@@ -5,14 +5,14 @@ use crate::services::archive_config_writer::{
 };
 use crate::services::git_repository::{self, stage_files, verify_staged_files};
 use crate::services::repository_transaction::{
-    self, acquire_lock, cleanup_transaction, execute_write, release_lock, rollback_transaction,
-    update_transaction_status, FileOperation, RepositoryFileChange, TransactionStatus,
+    self, cleanup_stale_lock, cleanup_transaction, execute_write, inspect_lock,
+    rollback_transaction, update_transaction_status, FileOperation, PublishLockGuard,
+    PublishLockStatus, RepositoryFileChange, TransactionStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use uuid::Uuid;
 
 /// A static transaction registry so we can find transactions across commands.
 static CURRENT_TRANSACTION: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
@@ -210,6 +210,13 @@ pub struct CommitTransactionResult {
 pub struct RollbackPublishRequest {
     pub repository_root: String,
     pub transaction_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupPublishLockRequest {
+    pub repository_root: String,
+    pub transaction_id: Option<String>,
 }
 
 // ─── Pre-Publish Check ──────────────────────────────────────────────────────
@@ -674,17 +681,20 @@ pub fn apply_publish_workspace(
         "update"
     };
 
-    // Acquire lock
-    let transaction_id = Uuid::new_v4().to_string();
-    acquire_lock(&repo_root, &transaction_id)?;
-
-    // Actually, we need to create transaction first
     let transaction = repository_transaction::create_transaction(
         &repo_root,
         &request.workspace_id,
         operation,
         planned_changes.clone(),
     )?;
+    let transaction_id = transaction.transaction_id.clone();
+    let lock_guard = match PublishLockGuard::acquire(&repo_root, &transaction_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = cleanup_transaction(&repo_root, &transaction_id);
+            return Err(error);
+        }
+    };
 
     // Store current transaction
     if let Ok(mut current) = current_transaction().lock() {
@@ -713,12 +723,11 @@ pub fn apply_publish_workspace(
         let mut failed_tx = transaction.clone();
         failed_tx.backups = backups;
         let _ = rollback_transaction(&repo_root, &failed_tx);
-        update_transaction_status(
+        let _ = update_transaction_status(
             &repo_root,
             &transaction.transaction_id,
             TransactionStatus::Failed,
-        )?;
-        release_lock(&repo_root, &transaction.transaction_id)?;
+        );
         return Err(format!("写入失败，已回滚：{}", e));
     }
 
@@ -741,7 +750,6 @@ pub fn apply_publish_workspace(
             Err(e) => {
                 // Rollback entire transaction
                 rollback_transaction(&repo_root, &transaction)?;
-                release_lock(&repo_root, &transaction.transaction_id)?;
                 return Err(format!("写入归档配置失败，已整体回滚：{}", e));
             }
         }
@@ -752,7 +760,7 @@ pub fn apply_publish_workspace(
         &transaction.transaction_id,
         TransactionStatus::Written,
     )?;
-    release_lock(&repo_root, &transaction.transaction_id)?;
+    lock_guard.persist();
 
     let changes_dto: Vec<PlannedChangeDto> = planned_changes
         .iter()
@@ -892,6 +900,7 @@ pub fn commit_transaction(
 
     // Load transaction
     let tx = repository_transaction::load_transaction(&repo_root, &request.transaction_id)?;
+    let lock_guard = PublishLockGuard::verify_existing(&repo_root, &request.transaction_id)?;
 
     // Verify HEAD hasn't changed
     let _head = repository_guard::resolve_head(&repo_root)?;
@@ -917,6 +926,7 @@ pub fn commit_transaction(
 
     // Clean up transaction directory
     let _ = cleanup_transaction(&repo_root, &request.transaction_id);
+    lock_guard.release()?;
 
     // Clear current transaction
     if let Ok(mut current) = current_transaction().lock() {
@@ -937,6 +947,7 @@ pub fn commit_transaction(
 pub fn rollback_publish(request: RollbackPublishRequest) -> Result<(), String> {
     let repo_root = PathBuf::from(&request.repository_root);
     let tx = repository_transaction::load_transaction(&repo_root, &request.transaction_id)?;
+    let lock_guard = PublishLockGuard::verify_existing(&repo_root, &request.transaction_id)?;
 
     if tx.status == TransactionStatus::RolledBack {
         return Err("该事务已经回滚".to_string());
@@ -945,10 +956,12 @@ pub fn rollback_publish(request: RollbackPublishRequest) -> Result<(), String> {
     if tx.status == TransactionStatus::Planned {
         // Nothing has been written yet, just clean up
         cleanup_transaction(&repo_root, &request.transaction_id)?;
+        lock_guard.release()?;
         return Ok(());
     }
 
     rollback_transaction(&repo_root, &tx)?;
+    lock_guard.release()?;
 
     // Clear current transaction
     if let Ok(mut current) = current_transaction().lock() {
@@ -956,6 +969,19 @@ pub fn rollback_publish(request: RollbackPublishRequest) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub fn inspect_publish_lock(repo_root: &str) -> Result<PublishLockStatus, String> {
+    inspect_lock(&PathBuf::from(repo_root))
+}
+
+pub fn cleanup_publish_lock(
+    request: CleanupPublishLockRequest,
+) -> Result<PublishLockStatus, String> {
+    cleanup_stale_lock(
+        &PathBuf::from(request.repository_root),
+        request.transaction_id.as_deref(),
+    )
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
