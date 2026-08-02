@@ -44,7 +44,27 @@ export type DesktopCommandErrorCode =
   | "ARCHIVE_PROFILE_CONFLICT"
   | "ARCHIVE_PROFILE_WRITE_FAILED"
   | "REPOSITORY_PATH_UNSAFE"
-  | "TARGET_PATH_OUTSIDE_ALLOWED_ROOT";
+  | "TARGET_PATH_OUTSIDE_ALLOWED_ROOT"
+  | "GIT_REMOTE_NOT_FOUND"
+  | "GIT_REMOTE_MISMATCH"
+  | "GIT_REMOTE_URL_UNSAFE"
+  | "GIT_BRANCH_MISMATCH"
+  | "GIT_REMOTE_AHEAD"
+  | "GIT_BRANCH_DIVERGED"
+  | "GIT_FETCH_FAILED"
+  | "GIT_PUSH_FAILED"
+  | "GIT_REMOTE_VERIFY_FAILED"
+  | "GITHUB_CLI_NOT_FOUND"
+  | "GITHUB_NOT_AUTHENTICATED"
+  | "GITHUB_WORKFLOW_NOT_FOUND"
+  | "GITHUB_WORKFLOW_FAILED"
+  | "GITHUB_WORKFLOW_CANCELLED"
+  | "GITHUB_WORKFLOW_TIMEOUT"
+  | "PUBLIC_SITE_UNREACHABLE"
+  | "PUBLIC_ARTICLE_NOT_FOUND"
+  | "PUBLIC_ARTICLE_VERIFY_TIMEOUT"
+  | "PUBLISH_ALREADY_PUSHED"
+  | "PUBLISH_RESET_FAILED";
 
 export interface DesktopCommandError {
   code: DesktopCommandErrorCode;
@@ -302,6 +322,76 @@ export interface CleanupPublishLockRequest {
   transactionId?: string;
 }
 
+// ─── Remote Publish Types ────────────────────────────────────────────────────
+
+export interface InspectRemotePublishRequest {
+  repositoryRoot: string;
+  commitHash: string;
+  remoteName: string;
+  branch: string;
+}
+
+export interface InspectRemotePublishResult {
+  remoteUrl: string;
+  remoteOwner: string;
+  remoteRepo: string;
+  branch: string;
+  headCommit: string;
+  ahead: number;
+  behind: number;
+  syncState: string;
+  untrackedFiles: number;
+  canPush: boolean;
+  message?: string;
+  pushedAlready: boolean;
+}
+
+export interface PushPublishRequest {
+  repositoryRoot: string;
+  commitHash: string;
+  remoteName: string;
+  branch: string;
+}
+
+export interface PushPublishResult {
+  pushed: boolean;
+  localHead: string;
+  remoteHead?: string;
+  alreadyPushed: boolean;
+}
+
+export interface DeploymentCheckRequest {
+  repositoryRoot: string;
+  commitHash: string;
+  workflowName: string;
+  branch: string;
+}
+
+export interface DeploymentCheckResult {
+  ghAvailable: boolean;
+  ghMessage?: string;
+  phase: string;
+  runId?: number;
+  runUrl?: string;
+  headSha?: string;
+  runStatus?: string;
+  runConclusion?: string;
+}
+
+export interface PublicArticleVerificationRequest {
+  url: string;
+  expectedTitle: string;
+}
+
+export interface PublicArticleVerificationResult {
+  reachable: boolean;
+  message: string;
+}
+
+export interface ResetPublishFlowRequest {
+  repositoryRoot: string;
+}
+
 export interface DesktopBridge {
   mode: "tauri" | "browser";
   selectMarkdownFile(request?: SelectMarkdownFileRequest): Promise<SelectedMarkdownFileDto>;
@@ -322,6 +412,14 @@ export interface DesktopBridge {
   selectRepositoryRoot(): Promise<RepositoryRootResult>;
   validateRepositoryRoot(repositoryRoot: string): Promise<RepositoryRootResult>;
   loadRepositoryTargetSettings(): Promise<RepositoryRootResult | undefined>;
+  // Remote publish commands
+  inspectRemotePublish(request: InspectRemotePublishRequest): Promise<InspectRemotePublishResult>;
+  pushPublishCommit(request: PushPublishRequest): Promise<PushPublishResult>;
+  checkGithubPagesDeployment(request: DeploymentCheckRequest): Promise<DeploymentCheckResult>;
+  waitGithubPagesDeployment(request: DeploymentCheckRequest): Promise<DeploymentCheckResult>;
+  verifyPublicArticle(request: PublicArticleVerificationRequest): Promise<PublicArticleVerificationResult>;
+  getPublicArticleUrl(slug: string): Promise<string>;
+  resetPublishFlow(request: ResetPublishFlowRequest): Promise<void>;
 }
 
 const MAX_MARKDOWN_SIZE = 10 * 1024 * 1024;
@@ -367,7 +465,27 @@ const errorMessages: Record<DesktopCommandErrorCode, string> = {
   ARCHIVE_PROFILE_CONFLICT: "归档方案冲突，请检查配置。",
   ARCHIVE_PROFILE_WRITE_FAILED: "写入归档配置失败。",
   REPOSITORY_PATH_UNSAFE: "仓库路径不安全。",
-  TARGET_PATH_OUTSIDE_ALLOWED_ROOT: "目标路径不在允许的写入根目录内。"
+  TARGET_PATH_OUTSIDE_ALLOWED_ROOT: "目标路径不在允许的写入根目录内。",
+  GIT_REMOTE_NOT_FOUND: "找不到指定的 Git 远程仓库。",
+  GIT_REMOTE_MISMATCH: "远程指向了其他仓库，请确认目标仓库。",
+  GIT_REMOTE_URL_UNSAFE: "远程地址无法识别，已阻止推送。",
+  GIT_BRANCH_MISMATCH: "当前分支与要推送的分支不一致，请确认。",
+  GIT_REMOTE_AHEAD: "GitHub 上存在本地尚未包含的提交，请先同步远程分支。",
+  GIT_BRANCH_DIVERGED: "本地与远程分支已分叉，请先同步后再推送。",
+  GIT_FETCH_FAILED: "同步远程分支失败，请检查网络后重试。",
+  GIT_PUSH_FAILED: "推送到 GitHub 失败，文章仍安全保存在本地 Commit 中。",
+  GIT_REMOTE_VERIFY_FAILED: "推送后未能确认远程 Commit，请重新检查。",
+  GITHUB_CLI_NOT_FOUND: "GitHub CLI 未安装，无法自动确认部署状态。",
+  GITHUB_NOT_AUTHENTICATED: "GitHub CLI 未登录，无法自动确认部署状态。",
+  GITHUB_WORKFLOW_NOT_FOUND: "未找到该 Commit 对应的部署工作流。",
+  GITHUB_WORKFLOW_FAILED: "GitHub 推送成功，但网站部署失败。",
+  GITHUB_WORKFLOW_CANCELLED: "网站部署已取消。",
+  GITHUB_WORKFLOW_TIMEOUT: "等待部署超时，请稍后重新检查。",
+  PUBLIC_SITE_UNREACHABLE: "公开网站暂时无法访问。",
+  PUBLIC_ARTICLE_NOT_FOUND: "公开文章页面暂时无法确认，可能仍在部署。",
+  PUBLIC_ARTICLE_VERIFY_TIMEOUT: "公开文章验证超时，请稍后重新检查。",
+  PUBLISH_ALREADY_PUSHED: "该发布 Commit 已推送，请勿重复推送。",
+  PUBLISH_RESET_FAILED: "重置发布流程失败，请重新检查。"
 };
 
 export function desktopErrorMessage(error: unknown): string {
@@ -530,6 +648,27 @@ export function createBrowserBridge(filePicker: () => Promise<File | undefined>)
     },
     async loadRepositoryTargetSettings() {
       return undefined;
+    },
+    async inspectRemotePublish() {
+      throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持远程发布。");
+    },
+    async pushPublishCommit() {
+      throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持远程发布。");
+    },
+    async checkGithubPagesDeployment() {
+      return { ghAvailable: false, phase: "not_started" };
+    },
+    async waitGithubPagesDeployment() {
+      return { ghAvailable: false, phase: "not_started" };
+    },
+    async verifyPublicArticle() {
+      return { reachable: false, message: "浏览器预览模式不能验证公开文章。" };
+    },
+    async getPublicArticleUrl(slug: string) {
+      return `https://dafenqirunrunrun.github.io/davinci-journey/notes/${slug}/`;
+    },
+    async resetPublishFlow() {
+      return undefined;
     }
   };
 }
@@ -553,7 +692,14 @@ export function createTauriBridge(): DesktopBridge {
     resolveRepositoryRoot: (request) => invokeTauri("resolve_repository_root_command", { request }),
     selectRepositoryRoot: () => invokeTauri("select_repository_root"),
     validateRepositoryRoot: (repositoryRoot) => invokeTauri("validate_repository_root_command", { repositoryRoot }),
-    loadRepositoryTargetSettings: () => invokeTauri("load_repository_target_settings")
+    loadRepositoryTargetSettings: () => invokeTauri("load_repository_target_settings"),
+    inspectRemotePublish: (request) => invokeTauri("inspect_remote_publish_command", { request }),
+    pushPublishCommit: (request) => invokeTauri("push_publish_commit_command", { request }),
+    checkGithubPagesDeployment: (request) => invokeTauri("check_github_pages_deployment_command", { request }),
+    waitGithubPagesDeployment: (request) => invokeTauri("wait_github_pages_deployment_command", { request }),
+    verifyPublicArticle: (request) => invokeTauri("verify_public_article_command", { request }),
+    getPublicArticleUrl: (slug) => invokeTauri("get_public_article_url_command", { slug }),
+    resetPublishFlow: (request) => invokeTauri("reset_publish_flow_command", { request })
   };
 }
 

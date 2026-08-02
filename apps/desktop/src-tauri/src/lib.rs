@@ -14,6 +14,13 @@ pub mod security;
 pub mod services;
 
 use security::repository_guard::{validate_repository_root, RepositoryRootResult};
+use services::publish_completion::{
+    check_deployment, inspect_remote_publish, public_article_url, push_publish_commit,
+    reset_publish_flow, verify_public_article_request, wait_for_deployment, DeploymentCheckRequest,
+    DeploymentCheckResult, InspectRemotePublishRequest, InspectRemotePublishResult,
+    PublicArticleVerificationRequest, PublicArticleVerificationResult, PushPublishRequest,
+    PushPublishResult, ResetPublishFlowRequest,
+};
 use services::repository_publish::{
     apply_publish_workspace, commit_transaction, pre_publish_check, rollback_publish,
     stage_transaction, ApplyWorkspaceRequest, ApplyWorkspaceResult, CleanupPublishLockRequest,
@@ -72,6 +79,28 @@ pub enum DesktopCommandError {
     ArchiveProfileWriteFailed,
     RepositoryPathUnsafe,
     TargetPathOutsideAllowedRoot,
+
+    // Remote publish errors
+    GitRemoteNotFound,
+    GitRemoteMismatch,
+    GitRemoteUrlUnsafe,
+    GitBranchMismatch,
+    GitRemoteAhead,
+    GitBranchDiverged,
+    GitFetchFailed,
+    GitPushFailed,
+    GitRemoteVerifyFailed,
+    GithubCliNotFound,
+    GithubNotAuthenticated,
+    GithubWorkflowNotFound,
+    GithubWorkflowFailed,
+    GithubWorkflowCancelled,
+    GithubWorkflowTimeout,
+    PublicSiteUnreachable,
+    PublicArticleNotFound,
+    PublicArticleVerifyTimeout,
+    PublishAlreadyPushed,
+    PublishResetFailed,
 }
 
 impl DesktopCommandError {
@@ -119,6 +148,26 @@ impl DesktopCommandError {
             Self::ArchiveProfileWriteFailed => "ARCHIVE_PROFILE_WRITE_FAILED",
             Self::RepositoryPathUnsafe => "REPOSITORY_PATH_UNSAFE",
             Self::TargetPathOutsideAllowedRoot => "TARGET_PATH_OUTSIDE_ALLOWED_ROOT",
+            Self::GitRemoteNotFound => "GIT_REMOTE_NOT_FOUND",
+            Self::GitRemoteMismatch => "GIT_REMOTE_MISMATCH",
+            Self::GitRemoteUrlUnsafe => "GIT_REMOTE_URL_UNSAFE",
+            Self::GitBranchMismatch => "GIT_BRANCH_MISMATCH",
+            Self::GitRemoteAhead => "GIT_REMOTE_AHEAD",
+            Self::GitBranchDiverged => "GIT_BRANCH_DIVERGED",
+            Self::GitFetchFailed => "GIT_FETCH_FAILED",
+            Self::GitPushFailed => "GIT_PUSH_FAILED",
+            Self::GitRemoteVerifyFailed => "GIT_REMOTE_VERIFY_FAILED",
+            Self::GithubCliNotFound => "GITHUB_CLI_NOT_FOUND",
+            Self::GithubNotAuthenticated => "GITHUB_NOT_AUTHENTICATED",
+            Self::GithubWorkflowNotFound => "GITHUB_WORKFLOW_NOT_FOUND",
+            Self::GithubWorkflowFailed => "GITHUB_WORKFLOW_FAILED",
+            Self::GithubWorkflowCancelled => "GITHUB_WORKFLOW_CANCELLED",
+            Self::GithubWorkflowTimeout => "GITHUB_WORKFLOW_TIMEOUT",
+            Self::PublicSiteUnreachable => "PUBLIC_SITE_UNREACHABLE",
+            Self::PublicArticleNotFound => "PUBLIC_ARTICLE_NOT_FOUND",
+            Self::PublicArticleVerifyTimeout => "PUBLIC_ARTICLE_VERIFY_TIMEOUT",
+            Self::PublishAlreadyPushed => "PUBLISH_ALREADY_PUSHED",
+            Self::PublishResetFailed => "PUBLISH_RESET_FAILED",
         }
     }
 
@@ -172,6 +221,26 @@ impl DesktopCommandError {
             Self::ArchiveProfileWriteFailed => "写入归档配置失败。",
             Self::RepositoryPathUnsafe => "仓库路径不安全。",
             Self::TargetPathOutsideAllowedRoot => "目标路径不在允许的写入根目录内。",
+            Self::GitRemoteNotFound => "找不到指定的 Git 远程仓库。",
+            Self::GitRemoteMismatch => "远程指向了其他仓库，请确认目标仓库。",
+            Self::GitRemoteUrlUnsafe => "远程地址无法识别，已阻止推送。",
+            Self::GitBranchMismatch => "当前分支与要推送的分支不一致，请确认。",
+            Self::GitRemoteAhead => "GitHub 上存在本地尚未包含的提交，请先同步远程分支。",
+            Self::GitBranchDiverged => "本地与远程分支已分叉，请先同步后再推送。",
+            Self::GitFetchFailed => "同步远程分支失败，请检查网络后重试。",
+            Self::GitPushFailed => "推送到 GitHub 失败，文章仍安全保存在本地 Commit 中。",
+            Self::GitRemoteVerifyFailed => "推送后未能确认远程 Commit，请重新检查。",
+            Self::GithubCliNotFound => "GitHub CLI 未安装，无法自动确认部署状态。",
+            Self::GithubNotAuthenticated => "GitHub CLI 未登录，无法自动确认部署状态。",
+            Self::GithubWorkflowNotFound => "未找到该 Commit 对应的部署工作流。",
+            Self::GithubWorkflowFailed => "GitHub 推送成功，但网站部署失败。",
+            Self::GithubWorkflowCancelled => "网站部署已取消。",
+            Self::GithubWorkflowTimeout => "等待部署超时，请稍后重新检查。",
+            Self::PublicSiteUnreachable => "公开网站暂时无法访问。",
+            Self::PublicArticleNotFound => "公开文章页面暂时无法确认，可能仍在部署。",
+            Self::PublicArticleVerifyTimeout => "公开文章验证超时，请稍后重新检查。",
+            Self::PublishAlreadyPushed => "该发布 Commit 已推送，请勿重复推送。",
+            Self::PublishResetFailed => "重置发布流程失败，请重新检查。",
         }
     }
 
@@ -184,6 +253,7 @@ impl DesktopCommandError {
                 | Self::RepositoryPathUnsafe
                 | Self::TargetPathOutsideAllowedRoot
                 | Self::PublishSourcePathMissing
+                | Self::GitRemoteUrlUnsafe
         )
     }
 }
@@ -645,6 +715,100 @@ fn cleanup_stale_publish_lock_command(
     })
 }
 
+// ─── Remote Publish Commands ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn inspect_remote_publish_command(
+    request: InspectRemotePublishRequest,
+) -> CommandResult<InspectRemotePublishResult> {
+    inspect_remote_publish(request).map_err(|e| CommandErrorDto {
+        code: infer_remote_error_code(&e),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn push_publish_commit_command(request: PushPublishRequest) -> CommandResult<PushPublishResult> {
+    push_publish_commit(request).map_err(|e| CommandErrorDto {
+        code: infer_remote_error_code(&e),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+#[tauri::command]
+fn check_github_pages_deployment_command(
+    request: DeploymentCheckRequest,
+) -> CommandResult<DeploymentCheckResult> {
+    Ok(check_deployment(request))
+}
+
+#[tauri::command]
+fn wait_github_pages_deployment_command(
+    request: DeploymentCheckRequest,
+) -> CommandResult<DeploymentCheckResult> {
+    Ok(wait_for_deployment(request, 30, 10))
+}
+
+#[tauri::command]
+fn verify_public_article_command(
+    request: PublicArticleVerificationRequest,
+) -> CommandResult<PublicArticleVerificationResult> {
+    Ok(verify_public_article_request(request))
+}
+
+#[tauri::command]
+fn get_public_article_url_command(slug: String) -> CommandResult<String> {
+    Ok(public_article_url(&slug))
+}
+
+#[tauri::command]
+fn reset_publish_flow_command(request: ResetPublishFlowRequest) -> CommandResult<()> {
+    reset_publish_flow(request).map_err(|e| CommandErrorDto {
+        code: DesktopCommandError::PublishResetFailed.code().to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: None,
+        recoverable: true,
+    })
+}
+
+/// Map an error message to a structured error code for remote publish.
+fn infer_remote_error_code(message: &str) -> String {
+    if message.contains("GIT_REMOTE_NOT_FOUND") {
+        DesktopCommandError::GitRemoteNotFound.code().to_string()
+    } else if message.contains("GIT_REMOTE_MISMATCH") {
+        DesktopCommandError::GitRemoteMismatch.code().to_string()
+    } else if message.contains("GIT_REMOTE_URL_UNSAFE") {
+        DesktopCommandError::GitRemoteUrlUnsafe.code().to_string()
+    } else if message.contains("GIT_BRANCH_MISMATCH") {
+        DesktopCommandError::GitBranchMismatch.code().to_string()
+    } else if message.contains("GIT_HEAD_CHANGED") {
+        DesktopCommandError::GitHeadChanged.code().to_string()
+    } else if message.contains("GIT_FETCH_FAILED") {
+        DesktopCommandError::GitFetchFailed.code().to_string()
+    } else if message.contains("GIT_PUSH_FAILED") {
+        DesktopCommandError::GitPushFailed.code().to_string()
+    } else if message.contains("GIT_REMOTE_VERIFY_FAILED") {
+        DesktopCommandError::GitRemoteVerifyFailed
+            .code()
+            .to_string()
+    } else if message.contains("PUBLISH_ALREADY_PUSHED") {
+        DesktopCommandError::PublishAlreadyPushed.code().to_string()
+    } else if message.contains("远程领先") || message.contains("远程分支") {
+        DesktopCommandError::GitRemoteAhead.code().to_string()
+    } else if message.contains("分叉") {
+        DesktopCommandError::GitBranchDiverged.code().to_string()
+    } else {
+        "REMOTE_PUBLISH_FAILED".to_string()
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -665,6 +829,13 @@ pub fn run() {
             rollback_repository_publish,
             inspect_publish_lock_command,
             cleanup_stale_publish_lock_command,
+            inspect_remote_publish_command,
+            push_publish_commit_command,
+            check_github_pages_deployment_command,
+            wait_github_pages_deployment_command,
+            verify_public_article_command,
+            get_public_article_url_command,
+            reset_publish_flow_command,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run desktop app");

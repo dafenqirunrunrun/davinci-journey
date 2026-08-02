@@ -79,6 +79,46 @@ export interface RepositoryPublishState {
   failedStage?: string;
 }
 
+export type RemotePublishStatus =
+  | "idle"
+  | "checking"
+  | "ready_to_push"
+  | "push_confirmation"
+  | "remote_conflict"
+  | "pushing"
+  | "pushed"
+  | "verifying_remote"
+  | "waiting_for_workflow"
+  | "deployment_succeeded"
+  | "deployment_failed"
+  | "website_verifying"
+  | "published"
+  | "push_failed"
+  | "verification_failed";
+
+export interface RemotePublishState {
+  status: RemotePublishStatus;
+  repositoryRoot: string;
+  remoteName: string;
+  remoteUrl?: string;
+  remoteOwner?: string;
+  remoteRepo?: string;
+  branch: string;
+  localCommitHash: string;
+  remoteCommitHash?: string;
+  ahead?: number;
+  behind?: number;
+  untrackedFiles?: number;
+  inspectMessage?: string;
+  workflowRunId?: number;
+  workflowUrl?: string;
+  workflowStatus?: string;
+  workflowConclusion?: string;
+  publicSiteUrl?: string;
+  publicArticleUrl?: string;
+  error?: string;
+}
+
 export interface PublishDraft {
   id: string;
   source: {
@@ -113,6 +153,7 @@ export interface PublishDraft {
     leadingTitleRemoved?: boolean;
   };
   repository: RepositoryPublishState;
+  remote: RemotePublishState;
   status: PublishStatus;
   error?: string;
 }
@@ -140,6 +181,13 @@ export const emptyDraft: PublishDraft = {
   },
   preview: {},
   repository: {},
+  remote: {
+    status: "idle",
+    repositoryRoot: "",
+    remoteName: "origin",
+    branch: "master",
+    localCommitHash: ""
+  },
   status: "selecting"
 };
 

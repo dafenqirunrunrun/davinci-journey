@@ -12,11 +12,11 @@ import {
 } from "@davinci-journey/classification";
 import { normalizeLeadingTitleHeading, parseMarkdown } from "@davinci-journey/markdown-core";
 import { initialArchiveProfiles } from "../archiveProfiles";
-import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type PublishLockStatus, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
-import { canContinueFromAssets, emptyDraft, type PublishDraft, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
+import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DeploymentCheckResult, type DesktopBridge, type InspectRemotePublishResult, type PrePublishCheckResult, type PublishLockStatus, type PushPublishResult, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
+import { canContinueFromAssets, emptyDraft, type PublishDraft, type RemotePublishState, type RemotePublishStatus, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
 import { getPublishWriteEligibility, publishWriteBlockReasonText } from "../publishWriteEligibility";
 
-const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览并发布", "写入仓库"];
+const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览工作区", "写入并提交", "推送与上线"];
 const today = "2026-07-30";
 
 const emptyForm: NewArchiveProfileInput = {
@@ -81,6 +81,13 @@ async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto, profil
       assetDirectory: preview.imageDirectory
     },
     repository: {},
+    remote: {
+      status: "idle",
+      repositoryRoot: "",
+      remoteName: "origin",
+      branch: "master",
+      localCommitHash: ""
+    },
     status: canContinueFromAssets(dependencies) ? "ready" : "needs_attention"
   };
 }
@@ -495,6 +502,244 @@ export function PublishFlow() {
     }
   }
 
+  // ─── Remote Publish (Step 7) ──────────────────────────────────────────────
+
+  /** Pre-push inspection: validates remote + branch + sync state. */
+  async function startRemotePublish() {
+    const commitHash = draft.repository.commitResult?.commitHash;
+    const repoRoot = getRepositoryRootForWrite();
+    if (!commitHash || !repoRoot) return;
+
+    setDraft((current) => ({
+      ...current,
+      remote: {
+        ...current.remote,
+        status: "checking",
+        repositoryRoot: repoRoot,
+        localCommitHash: commitHash,
+        branch: current.repository.commitResult?.branch || "master",
+        error: undefined
+      }
+    }));
+
+    try {
+      const inspect: InspectRemotePublishResult = await bridge.inspectRemotePublish({
+        repositoryRoot: repoRoot,
+        commitHash,
+        remoteName: "origin",
+        branch: "master"
+      });
+
+      if (inspect.pushedAlready) {
+        setDraft((current) => ({
+          ...current,
+          remote: {
+            ...current.remote,
+            status: "pushed",
+            remoteUrl: inspect.remoteUrl,
+            remoteOwner: inspect.remoteOwner,
+            remoteRepo: inspect.remoteRepo,
+            remoteCommitHash: commitHash,
+            ahead: inspect.ahead,
+            behind: inspect.behind,
+            untrackedFiles: inspect.untrackedFiles,
+            inspectMessage: "该 Commit 已推送到远程。"
+          }
+        }));
+        return;
+      }
+
+      if (!inspect.canPush) {
+        setDraft((current) => ({
+          ...current,
+          remote: {
+            ...current.remote,
+            status: "remote_conflict",
+            remoteUrl: inspect.remoteUrl,
+            remoteOwner: inspect.remoteOwner,
+            remoteRepo: inspect.remoteRepo,
+            ahead: inspect.ahead,
+            behind: inspect.behind,
+            untrackedFiles: inspect.untrackedFiles,
+            inspectMessage: inspect.message
+          }
+        }));
+        return;
+      }
+
+      setDraft((current) => ({
+        ...current,
+        remote: {
+          ...current.remote,
+          status: "ready_to_push",
+          remoteUrl: inspect.remoteUrl,
+          remoteOwner: inspect.remoteOwner,
+          remoteRepo: inspect.remoteRepo,
+          ahead: inspect.ahead,
+          behind: inspect.behind,
+          untrackedFiles: inspect.untrackedFiles,
+          inspectMessage: inspect.message
+        }
+      }));
+    } catch (error) {
+      setDraft((current) => ({
+        ...current,
+        remote: { ...current.remote, status: "push_failed", error: desktopErrorMessage(error) }
+      }));
+    }
+  }
+
+  /** User confirmed push. */
+  async function confirmPush() {
+    const commitHash = draft.remote.localCommitHash;
+    const repoRoot = getRepositoryRootForWrite();
+    if (!commitHash || !repoRoot) return;
+
+    setDraft((current) => ({ ...current, remote: { ...current.remote, status: "pushing", error: undefined } }));
+    try {
+      const pushResult: PushPublishResult = await bridge.pushPublishCommit({
+        repositoryRoot: repoRoot,
+        commitHash,
+        remoteName: "origin",
+        branch: "master"
+      });
+
+      const remoteHead = pushResult.remoteHead || commitHash;
+      setDraft((current) => ({
+        ...current,
+        remote: {
+          ...current.remote,
+          status: "verifying_remote",
+          remoteCommitHash: remoteHead
+        }
+      }));
+
+      // Proceed to deployment tracking.
+      await runDeploymentTracking(commitHash, repoRoot);
+    } catch (error) {
+      setDraft((current) => ({
+        ...current,
+        remote: { ...current.remote, status: "push_failed", error: desktopErrorMessage(error) }
+      }));
+    }
+  }
+
+  /** Track the Deploy Pages workflow for the pushed commit. */
+  async function runDeploymentTracking(commitHash: string, repoRoot: string) {
+    setDraft((current) => ({ ...current, remote: { ...current.remote, status: "waiting_for_workflow" } }));
+    try {
+      const first = await bridge.checkGithubPagesDeployment({
+        repositoryRoot: repoRoot,
+        commitHash,
+        workflowName: "Deploy Pages",
+        branch: "master"
+      });
+
+      // If gh is unavailable, degrade gracefully to `pushed`.
+      if (!first.ghAvailable) {
+        setDraft((current) => ({
+          ...current,
+          remote: {
+            ...current.remote,
+            status: "pushed",
+            workflowStatus: undefined,
+            workflowConclusion: undefined
+          }
+        }));
+        return;
+      }
+
+      // gh available → wait for terminal phase (server-side 30 attempts × 10s).
+      const final = await bridge.waitGithubPagesDeployment({
+        repositoryRoot: repoRoot,
+        commitHash,
+        workflowName: "Deploy Pages",
+        branch: "master"
+      });
+
+      applyDeploymentResult(final, commitHash);
+    } catch (error) {
+      setDraft((current) => ({
+        ...current,
+        remote: { ...current.remote, status: "deployment_failed", error: desktopErrorMessage(error) }
+      }));
+    }
+  }
+
+  function applyDeploymentResult(result: DeploymentCheckResult, commitHash: string) {
+    const phase = result.phase;
+    setDraft((current) => ({
+      ...current,
+      remote: {
+        ...current.remote,
+        status: phase === "success" ? "deployment_succeeded" : "deployment_failed",
+        workflowRunId: result.runId,
+        workflowUrl: result.runUrl,
+        workflowStatus: result.runStatus,
+        workflowConclusion: result.runConclusion,
+        error: phase === "success" ? undefined : (result.ghMessage ?? "网站部署未成功。")
+      }
+    }));
+
+    if (phase === "success") {
+      void verifyPublishedArticle(commitHash);
+    }
+  }
+
+  /** Verify the public article URL is reachable. */
+  async function verifyPublishedArticle(commitHash: string) {
+    const slug = draft.article.slug;
+    const articleUrl = await bridge.getPublicArticleUrl(slug);
+    setDraft((current) => ({
+      ...current,
+      remote: {
+        ...current.remote,
+        status: "website_verifying",
+        publicArticleUrl: articleUrl,
+        publicSiteUrl: "https://dafenqirunrunrun.github.io/davinci-journey/"
+      }
+    }));
+
+    const result = await bridge.verifyPublicArticle({
+      url: articleUrl,
+      expectedTitle: draft.article.title
+    });
+
+    if (result.reachable) {
+      setDraft((current) => ({
+        ...current,
+        remote: { ...current.remote, status: "published" }
+      }));
+    } else {
+      setDraft((current) => ({
+        ...current,
+        remote: {
+          ...current.remote,
+          status: "verification_failed",
+          error: result.message
+        }
+      }));
+    }
+  }
+
+  /** Reset the flow to publish another note. */
+  async function resetForNextPublish() {
+    const repoRoot = getRepositoryRootForWrite();
+    try {
+      if (repoRoot) {
+        await bridge.resetPublishFlow({ repositoryRoot: repoRoot });
+      }
+      setDraft(emptyDraft);
+      setCommitMessage("");
+      setStep(1);
+    } catch (error) {
+      setDraft((current) => ({
+        ...current,
+        remote: { ...current.remote, status: "verification_failed", error: desktopErrorMessage(error) }
+      }));
+    }
+  }
+
   async function doRollback() {
     const txId = draft.repository.transactionId;
     if (!txId) return;
@@ -829,6 +1074,7 @@ export function PublishFlow() {
           {draft.status === "committed" && draft.repository.commitResult && (
             <CommitResultView
               result={draft.repository.commitResult}
+              onPush={() => { setStep(7); void startRemotePublish(); }}
             />
           )}
 
@@ -840,6 +1086,79 @@ export function PublishFlow() {
 
           {draft.error && draft.status !== "written" && draft.status !== "confirm_commit" && draft.status !== "precheck_failed" && draft.status !== "write_failed" && draft.status !== "stage_failed" && draft.status !== "commit_failed" && (
             <p className="error-message">{draft.error}</p>
+          )}
+        </div>
+      )}
+
+      {step === 7 && (
+        <div className="panel repository-publish-panel">
+          <StepHeader title="推送与上线" eyebrow="第 7 步" />
+
+          {draft.remote.status === "checking" && (
+            <div className="status-message"><p>正在检查远程仓库状态...</p></div>
+          )}
+
+          {draft.remote.status === "ready_to_push" && (
+            <PushConfirmationView
+              remote={draft.remote}
+              onConfirm={() => void confirmPush()}
+              onBack={() => setStep(6)}
+            />
+          )}
+
+          {draft.remote.status === "remote_conflict" && (
+            <RemoteConflictView remote={draft.remote} onRecheck={() => void startRemotePublish()} />
+          )}
+
+          {(draft.remote.status === "pushing" || draft.remote.status === "verifying_remote" || draft.remote.status === "waiting_for_workflow" || draft.remote.status === "website_verifying") && (
+            <DeploymentTimeline remote={draft.remote} />
+          )}
+
+          {draft.remote.status === "pushed" && (
+            <PushedView remote={draft.remote} onReset={() => void resetForNextPublish()} />
+          )}
+
+          {draft.remote.status === "published" && (
+            <PublishSuccessView remote={draft.remote} articleTitle={draft.article.title} onReset={() => void resetForNextPublish()} />
+          )}
+
+          {draft.remote.status === "push_failed" && (
+            <PublishFailedView
+              title="推送失败"
+              message="推送失败，文章仍安全保存在本地 Commit 中。"
+              detail={draft.remote.error}
+              actions={[
+                { label: "重新检查", onClick: () => void startRemotePublish() },
+                { label: "重新推送", onClick: () => void confirmPush() }
+              ]}
+              onBack={() => setStep(6)}
+            />
+          )}
+
+          {draft.remote.status === "deployment_failed" && (
+            <PublishFailedView
+              title="部署失败"
+              message="GitHub 推送成功，但网站部署失败。"
+              detail={draft.remote.error}
+              actions={[
+                { label: "重新检查部署状态", onClick: () => void startRemotePublish() },
+                { label: "打开 GitHub Actions", onClick: () => window.open("https://github.com/dafenqirunrunrun/davinci-journey/actions", "_blank") }
+              ]}
+              onBack={() => setStep(6)}
+            />
+          )}
+
+          {draft.remote.status === "verification_failed" && (
+            <PublishFailedView
+              title="网站验证失败"
+              message="GitHub Pages 部署已成功，但暂未确认文章页面可访问。"
+              detail={draft.remote.error}
+              actions={[
+                { label: "重新检查网页", onClick: () => void verifyPublishedArticle(draft.remote.localCommitHash) },
+                { label: "打开网站首页", onClick: () => window.open(draft.remote.publicSiteUrl || "https://dafenqirunrunrun.github.io/davinci-journey/", "_blank") }
+              ]}
+              onBack={() => setStep(6)}
+            />
           )}
         </div>
       )}
@@ -1162,8 +1481,9 @@ function CommitView({ message, stagedFiles, onMessageChange, onCommit, onBack, e
   );
 }
 
-function CommitResultView({ result }: {
+function CommitResultView({ result, onPush }: {
   result: import("../desktopBridge").CommitTransactionResult;
+  onPush: () => void;
 }) {
   return (
     <div className="commit-result">
@@ -1180,9 +1500,201 @@ function CommitResultView({ result }: {
       </section>
 
       <p className="muted-text">本地提交已完成，尚未推送到 GitHub。</p>
-      <button className="secondary-button" type="button" disabled title="推送到 GitHub（下一阶段）">
-        推送到 GitHub（下一阶段）
-      </button>
+      <div className="actions">
+        <button className="primary-button" type="button" onClick={onPush}>
+          推送到 GitHub
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PushConfirmationView({ remote, onConfirm, onBack }: {
+  remote: RemotePublishState;
+  onConfirm: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="push-confirmation">
+      <h3>准备推送到 GitHub</h3>
+
+      <section className="write-section">
+        <h4>远程仓库</h4>
+        <p>{remote.remoteOwner}/{remote.remoteRepo}</p>
+        <code>{remote.remoteUrl}</code>
+      </section>
+
+      <section className="write-section">
+        <h4>分支</h4>
+        <p><code>{remote.branch}</code></p>
+      </section>
+
+      <section className="write-section">
+        <h4>本地 Commit</h4>
+        <p><code>{remote.localCommitHash.slice(0, 7)}</code></p>
+      </section>
+
+      <section className="write-section">
+        <h4>领先远程</h4>
+        <p>{remote.ahead} 个 Commit{remote.behind ? ` · 落后 ${remote.behind} 个` : ""}</p>
+      </section>
+
+      {remote.untrackedFiles != null && remote.untrackedFiles > 0 && (
+        <p className="muted-text">
+          未跟踪文件：{remote.untrackedFiles} 个，这些文件不在任何 Commit 中，不会被推送。
+        </p>
+      )}
+
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onBack}>返回检查</button>
+        <button className="primary-button" type="button" onClick={onConfirm}>
+          确认推送到 GitHub
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RemoteConflictView({ remote, onRecheck }: {
+  remote: RemotePublishState;
+  onRecheck: () => void;
+}) {
+  return (
+    <div className="failure-state">
+      <h3>远程状态冲突</h3>
+      <p className="warning-text">{remote.inspectMessage || "远程与本地不一致，无法推送。"}</p>
+      <div className="actions">
+        <button className="primary-button" type="button" onClick={onRecheck}>
+          重新检查
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DeploymentTimeline({ remote }: { remote: RemotePublishState }) {
+  const committed = true;
+  const pushed = ["verifying_remote", "waiting_for_workflow", "website_verifying"].includes(remote.status);
+  const deploying = remote.status === "waiting_for_workflow";
+  const verifying = remote.status === "website_verifying";
+
+  return (
+    <div className="deployment-timeline">
+      <h3>正在发布</h3>
+      <ol className="timeline">
+        <li className={committed ? "done" : ""}><span>✓</span> 本地 Commit</li>
+        <li className={pushed ? "done" : ""}><span>{pushed ? "✓" : "○"}</span> 推送 GitHub</li>
+        <li className={deploying ? "active" : ""}><span>{deploying ? "●" : verifying ? "✓" : "○"}</span> GitHub Pages 构建中</li>
+        <li className={verifying ? "active" : ""}><span>{verifying ? "●" : "○"}</span> 验证公开文章</li>
+      </ol>
+      <p className="muted-text">请稍候，部署可能需要几分钟。</p>
+    </div>
+  );
+}
+
+function PushedView({ remote, onReset }: {
+  remote: RemotePublishState;
+  onReset: () => void;
+}) {
+  return (
+    <div className="push-result">
+      <p className="eyebrow">已成功推送到 GitHub</p>
+      <p className="muted-text">
+        当前无法自动确认 GitHub Pages 部署状态，请稍后查看 GitHub Actions 或打开公开网站。
+      </p>
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={() => window.open("https://github.com/dafenqirunrunrun/davinci-journey/actions", "_blank")}>
+          打开 GitHub Actions
+        </button>
+        <button className="secondary-button" type="button" onClick={() => window.open("https://dafenqirunrunrun.github.io/davinci-journey/", "_blank")}>
+          打开公开网站
+        </button>
+        <button className="primary-button" type="button" onClick={() => void onReset()}>
+          发布下一篇
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PublishSuccessView({ remote, articleTitle, onReset }: {
+  remote: RemotePublishState;
+  articleTitle: string;
+  onReset: () => void;
+}) {
+  return (
+    <div className="publish-success">
+      <p className="eyebrow">公开发布成功</p>
+
+      <section className="write-section">
+        <h4>文章</h4>
+        <p>{articleTitle || "已发布文章"}</p>
+      </section>
+
+      <section className="write-section">
+        <h4>本地 Commit</h4>
+        <p><code>{remote.localCommitHash.slice(0, 7)}</code></p>
+      </section>
+
+      <section className="write-section">
+        <h4>远程仓库</h4>
+        <p>{remote.remoteOwner}/{remote.remoteRepo}</p>
+      </section>
+
+      <section className="write-section">
+        <h4>GitHub Pages</h4>
+        <p>部署成功</p>
+      </section>
+
+      {remote.publicArticleUrl && (
+        <section className="write-section">
+          <h4>公开文章</h4>
+          <a href={remote.publicArticleUrl} target="_blank" rel="noreferrer">{remote.publicArticleUrl}</a>
+        </section>
+      )}
+
+      <div className="actions">
+        {remote.publicArticleUrl && (
+          <button className="secondary-button" type="button" onClick={() => window.open(remote.publicArticleUrl, "_blank")}>
+            打开公开文章
+          </button>
+        )}
+        <button className="secondary-button" type="button" onClick={() => window.open("https://dafenqirunrunrun.github.io/davinci-journey/", "_blank")}>
+          打开网站首页
+        </button>
+        <button className="secondary-button" type="button" onClick={() => window.open(`https://github.com/dafenqirunrunrun/davinci-journey/commit/${remote.localCommitHash}`, "_blank")}>
+          打开 GitHub Commit
+        </button>
+        <button className="primary-button" type="button" onClick={onReset}>
+          发布下一篇
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PublishFailedView({ title, message, detail, actions, onBack }: {
+  title: string;
+  message: string;
+  detail?: string;
+  actions: { label: string; onClick: () => void }[];
+  onBack: () => void;
+}) {
+  return (
+    <div className="failure-state">
+      <h3>{title}</h3>
+      <p className="error-message">{message}</p>
+      {detail && <p className="muted-text">{detail}</p>}
+      <div className="actions">
+        {actions.map((action) => (
+          <button className="primary-button" type="button" key={action.label} onClick={action.onClick}>
+            {action.label}
+          </button>
+        ))}
+        <button className="secondary-button" type="button" onClick={onBack}>
+          返回
+        </button>
+      </div>
     </div>
   );
 }
