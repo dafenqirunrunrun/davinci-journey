@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractDescription,
   getNotes,
+  getRecentNotes,
   renderNoteHtml,
   resolveDescription,
   sortNotesDescending,
@@ -304,5 +305,28 @@ describe("homepage data layer", () => {
       const curr = notes[i]!;
       expect((prev.updated || prev.date || "").localeCompare(curr.updated || curr.date || "")).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it("getRecentNotes caps at 4 and keeps newest-first order", () => {
+    const notes = [
+      { title: "a", updated: "2026-01-01" },
+      { title: "b", updated: "2026-06-01" },
+      { title: "c", date: "2026-03-01" },
+      { title: "d", updated: "2026-05-01" },
+      { title: "e", updated: "2026-07-01" }
+    ];
+    const recent = getRecentNotes(notes, 4);
+    expect(recent).toHaveLength(4);
+    // Newest-first: e(07-01) > b(06-01) > d(05-01) > c(03-01)
+    expect(recent[0]!.title).toBe("e");
+    expect(recent[1]!.title).toBe("b");
+    expect(recent[2]!.title).toBe("d");
+    expect(recent[3]!.title).toBe("c");
+    expect(recent.map((n) => n.title)).not.toContain("a");
+  });
+
+  it("getRecentNotes returns all notes when fewer than the limit", () => {
+    const notes = [{ title: "a", updated: "2026-01-01" }];
+    expect(getRecentNotes(notes, 4)).toHaveLength(1);
   });
 });

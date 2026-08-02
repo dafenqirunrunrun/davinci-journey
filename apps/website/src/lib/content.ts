@@ -324,6 +324,14 @@ export function sortNotesDescending<T extends { updated?: string; date?: string 
   return (b.updated || b.date || "").localeCompare(a.updated || a.date || "");
 }
 
+/**
+ * Select the newest notes for the homepage's "最新笔记" list.
+ * Sorted by `updated`/`date` descending, capped at `limit` (default 4).
+ */
+export function getRecentNotes<T extends { updated?: string; date?: string }>(notes: T[], limit = 4): T[] {
+  return [...notes].sort(sortNotesDescending).slice(0, limit);
+}
+
 export async function renderNoteHtml(markdown: string, _title: string): Promise<string> {
   const file = await unified()
     .use(remarkParse)

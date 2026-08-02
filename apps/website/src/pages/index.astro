@@ -1,67 +1,44 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
-import { getNotes } from "../lib/content";
+import { getNotes, getRecentNotes } from "../lib/content";
 import { SITE_DESCRIPTION, withBase } from "../lib/site";
 
 const notes = getNotes();
-const recent = notes.slice(0, 4);
-const featured = notes.filter((note) => note.featured).slice(0, 3);
-const hasFeatured = featured.length > 0;
+const recent = getRecentNotes(notes, 4);
 ---
 
 <BaseLayout>
   <section class="hero">
-    <p class="eyebrow">AI Agent · RAG · LLM 工程实践</p>
     <h1>达芬奇的奇妙之旅</h1>
     <p class="lead">{SITE_DESCRIPTION}</p>
-    <a class="button primary hero-cta" href={withBase("/notes/")}>浏览全部笔记</a>
   </section>
 
-  <section class="section notes-section">
-    <div class="section-head">
-      <h2>最新笔记</h2>
+  <section class="section notes-section" aria-labelledby="latest-notes-heading">
+    <header class="section-head">
+      <h2 id="latest-notes-heading">最新笔记</h2>
       {recent.length > 0 && (
-        <a class="text-link" href={withBase("/notes/")}>查看全部笔记 →</a>
+        <a class="text-link" href={withBase("/notes/")}>查看全部 →</a>
       )}
-    </div>
+    </header>
     {recent.length === 0 ? (
       <p class="empty">暂时还没有公开笔记。</p>
     ) : (
-      <div class="grid">
+      <div class="note-list">
         {recent.map((note) => (
-          <a class="card note-card" href={withBase(note.urlPath)}>
-            <span class="pill">{note.topic || note.category}</span>
-            <h3>{note.title}</h3>
-            <p class="card-desc">{note.description}</p>
-            <div class="card-meta">
-              <span class="updated">{note.updated || note.date}</span>
-              {note.tags.slice(0, 2).map((tag) => (
-                <span class="tag">{tag}</span>
-              ))}
-            </div>
-          </a>
+          <article class="note-list-item">
+            <a class="note-list-link" href={withBase(note.urlPath)}>
+              <h3>{note.title}</h3>
+              <p class="note-list-description">{note.description}</p>
+              <div class="note-list-meta">
+                <span>{note.updated || note.date}</span>
+                {note.tags.slice(0, 2).map((tag) => (
+                  <span class="meta-item">· {tag}</span>
+                ))}
+              </div>
+            </a>
+          </article>
         ))}
       </div>
     )}
   </section>
-
-  {hasFeatured && (
-    <section class="section notes-section">
-      <div class="section-head">
-        <h2>精选</h2>
-      </div>
-      <div class="grid">
-        {featured.map((note) => (
-          <a class="card note-card" href={withBase(note.urlPath)}>
-            <span class="pill">{note.topic || note.category}</span>
-            <h3>{note.title}</h3>
-            <p class="card-desc">{note.description}</p>
-            <div class="card-meta">
-              <span class="updated">{note.updated || note.date}</span>
-            </div>
-          </a>
-        ))}
-      </div>
-    </section>
-  )}
 </BaseLayout>
