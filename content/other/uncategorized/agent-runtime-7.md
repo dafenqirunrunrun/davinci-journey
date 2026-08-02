@@ -2,7 +2,7 @@
 archiveProfile: "uncategorized"
 category: "Other"
 date: "2026-07-30"
-description: ""
+description: "系统梳理 Agent Runtime 中的重试、幂等、补偿、异步、流式、工具调用、MCP 与可观测性设计。"
 draft: false
 featured: false
 slug: "agent-runtime-7"

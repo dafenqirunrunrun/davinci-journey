@@ -139,22 +139,123 @@ export function stripDuplicateTitleHeading(markdown: string, title: string): str
   return lines.join("\n").replace(/^\s+/, "");
 }
 
-function stripMarkdownForSummary(markdown: string): string {
-  return markdown
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/!\[[^\]]*]\([^)]+\)/g, " ")
-    .replace(/\[[^\]]+]\([^)]+\)/g, "$1")
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/^>\s?/gm, "")
-    .replace(/[*_`~|[\]-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+type MdastNode = {
+  type?: string;
+  value?: string;
+  depth?: number;
+  children?: MdastNode[];
+};
+
+/** TOC headings whose following link list must be excluded from excerpts. */
+const TOC_HEADINGS = new Set(["目录", "table of contents", "toc", "contents"]);
+
+/** Extract readable plain text from a single Markdown AST node. */
+function nodeToPlainText(node: MdastNode): string {
+  if (node.type === "text") return node.value ?? "";
+  if (node.type === "inlineCode" || node.type === "code") return node.value ?? "";
+  if (node.type === "image" || node.type === "html" || node.type === "definition") return "";
+  if (node.children) return (node.children ?? []).map(nodeToPlainText).join("");
+  return "";
 }
 
-export function extractDescription(body: string, title: string): string {
-  const text = stripMarkdownForSummary(stripDuplicateTitleHeading(body, title));
-  if (!text) return "暂无摘要。";
-  return text.length > 150 ? `${text.slice(0, 150)}...` : text;
+/** Truncate a Chinese-friendly excerpt to roughly 100–160 characters. */
+function truncateExcerpt(text: string, maxLength = 150): string {
+  if (text.length <= maxLength) return text;
+  const slice = text.slice(0, maxLength);
+  const lastSentenceEnd = Math.max(
+    slice.lastIndexOf("。"),
+    slice.lastIndexOf("！"),
+    slice.lastIndexOf("？")
+  );
+  if (lastSentenceEnd > maxLength * 0.6) {
+    return text.slice(0, lastSentenceEnd + 1);
+  }
+  const lastSpace = slice.lastIndexOf(" ");
+  if (lastSpace > maxLength * 0.6) {
+    return text.slice(0, lastSpace) + "…";
+  }
+  return slice + "…";
+}
+
+/**
+ * Generate a clean auto-excerpt from the Markdown body when Front Matter
+ * `description` is empty. AST-based — no regex summary extraction.
+ *
+ * Rules: ignores Front Matter, the leading duplicate H1 and all headings,
+ * code blocks, tables, HTML, and any Table-of-Contents heading plus its list.
+ * The excerpt comes from the first meaningful paragraph or blockquote, with
+ * Markdown formatting stripped and text truncated to ~150 characters.
+ */
+export function extractDescription(body: string, _title: string): string {
+  const tree = unified().use(remarkParse).use(remarkGfm).parse(body) as { children: MdastNode[] };
+  const children = tree.children ?? [];
+
+  let excerpt = "";
+  let inToc = false;
+
+  for (const node of children) {
+    const type = node.type;
+
+    // Ignore YAML front matter and blank text/html nodes.
+    if (type === "yaml") continue;
+    if ((type === "text" || type === "html") && !(node.value ?? "").trim()) continue;
+
+    // Headings never become excerpt content.
+    if (type === "heading") {
+      const headingText = nodeToPlainText(node).trim().toLowerCase();
+      if (TOC_HEADINGS.has(headingText)) {
+        inToc = true; // skip the following TOC link list
+      } else {
+        inToc = false;
+      }
+      if (excerpt) break; // reached a later section heading
+      continue;
+    }
+
+    // Inside a TOC, skip the link list entirely.
+    if (inToc) {
+      if (type === "list") continue;
+      inToc = false;
+    }
+
+    // Lists, code, tables, images, thematic breaks and raw HTML are not excerpt sources.
+    if (
+      type === "list" ||
+      type === "code" ||
+      type === "table" ||
+      type === "image" ||
+      type === "thematicBreak" ||
+      type === "html"
+    ) {
+      continue;
+    }
+
+    // First meaningful paragraph or blockquote becomes the excerpt.
+    if (type === "paragraph" || type === "blockquote") {
+      const text = nodeToPlainText(node).replace(/\s+/g, " ").trim();
+      if (text) {
+        excerpt = text;
+        break;
+      }
+    }
+  }
+
+  if (!excerpt) return "暂无摘要。";
+  return truncateExcerpt(excerpt);
+}
+
+/**
+ * Resolve the article description.
+ *
+ * Priority: a non-empty Front Matter `description` wins; otherwise fall back
+ * to the AST-based auto-excerpt; otherwise a concise empty state.
+ * Empty/whitespace-only/null descriptions all trigger auto-excerpt.
+ */
+export function resolveDescription(frontMatterDescription: unknown, body: string, title: string): string {
+  if (typeof frontMatterDescription === "string" && frontMatterDescription.trim()) {
+    return frontMatterDescription.trim();
+  }
+  return extractDescription(body, title);
 }
 
 function rehypeSafeLinksAndAssets() {
@@ -198,7 +299,7 @@ export function getNotes(): NoteEntry[] {
       return {
         slug,
         title,
-        description: typeof frontMatter.description === "string" && frontMatter.description.trim() ? frontMatter.description.trim() : extractDescription(body, title),
+        description: resolveDescription(frontMatter.description, body, title),
         category,
         topic: frontMatter.topic,
         tags: Array.isArray(frontMatter.tags) ? frontMatter.tags : [],

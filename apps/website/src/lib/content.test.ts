@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractDescription,
   renderNoteHtml,
+  resolveDescription,
   stripDuplicateTitleHeading
 } from "./content";
 
@@ -103,5 +104,160 @@ describe("website markdown rendering", () => {
 
     expect(description).toContain("核心思想");
     expect(description).not.toContain("这篇笔记尚未填写摘要");
+  });
+});
+
+describe("auto excerpt generation (empty description)", () => {
+  it("extracts from the first blockquote and excludes TOC links", () => {
+    const body = [
+      "> **核心思想：将“模型能想”转化为“系统能做”，让模型输出变成可控、可追踪、可恢复的系统动作。**",
+      "",
+      "## 目录",
+      "",
+      "- [一、可靠执行](#一可靠执行)",
+      "- [二、异步流式](#二异步流式)",
+      "- [三、Agent Runtime](#三agent-runtime)",
+      "- [四、Structured Outputs](#四structured-outputs)",
+      "- [五、MCP](#五mcp)",
+      "- [六、Correlation ID](#六correlation-id)",
+      "- [七、分层](#七分层)",
+      "- [八、术语](#八术语)",
+      "",
+      "---",
+      "",
+      "## 一、可靠执行",
+      "",
+      "重试不能单独使用。"
+    ].join("\n");
+
+    const description = extractDescription(body, "Agent Runtime");
+
+    expect(description).toContain("核心思想");
+    expect(description).not.toContain("目录");
+    expect(description).not.toContain("$1");
+    expect(description).not.toContain("一、可靠执行");
+    expect(description).not.toContain("可靠执行");
+    expect(description).not.toContain("#");
+  });
+
+  it("extracts from the first paragraph when no blockquote exists", () => {
+    const body = "## 简介\n\n这是一段有意义的正文，用于自动摘要。\n\n## 后续\n\n第二段。";
+    const description = extractDescription(body, "测试");
+    expect(description).toContain("这是一段有意义的正文");
+    expect(description).not.toContain("简介");
+    expect(description).not.toContain("$1");
+  });
+
+  it("skips TOC before any paragraph", () => {
+    const body = [
+      "## 目录",
+      "",
+      "- [一](#一)",
+      "- [二](#二)",
+      "",
+      "## 一、正文",
+      "",
+      "真正的内容从这里开始。"
+    ].join("\n");
+    const description = extractDescription(body, "测试");
+    expect(description).toContain("真正的内容");
+    expect(description).not.toContain("目录");
+    expect(description).not.toContain("$1");
+  });
+
+  it("skips code blocks, tables and headings", () => {
+    const body = [
+      "| 状态 | 含义 |",
+      "|---|---|",
+      "| `PENDING` | 等待 |",
+      "",
+      "```ts",
+      "const value = true;",
+      "```",
+      "",
+      "## 小节",
+      "",
+      "> 引用内容保留。",
+      "",
+      "```ts",
+      "const second = 2;",
+      "```"
+    ].join("\n");
+    const description = extractDescription(body, "测试");
+    expect(description).toContain("引用内容");
+    expect(description).not.toContain("PENDING");
+    expect(description).not.toContain("const value");
+    expect(description).not.toContain("小节");
+    expect(description).not.toContain("$1");
+  });
+
+  it("converts link labels to plain text without leaking $1", () => {
+    const body = "参考 [LangGraph 文档](https://example.com) 了解更多。";
+    const description = extractDescription(body, "测试");
+    expect(description).toContain("LangGraph 文档");
+    expect(description).not.toContain("$1");
+    expect(description).not.toContain("https://");
+  });
+
+  it("truncates long Chinese text to a readable length", () => {
+    const longText = "这是".repeat(200);
+    const description = extractDescription(`> ${longText}`, "测试");
+    expect(description.length).toBeLessThanOrEqual(160);
+    expect(description.length).toBeGreaterThan(0);
+  });
+
+  it("returns a concise empty state when nothing is extractable", () => {
+    const description = extractDescription("```ts\n代码\n```\n\n| a | b |\n|---|---|", "测试");
+    expect(description).toBe("暂无摘要。");
+    expect(description).not.toContain("$1");
+  });
+
+  it("uses a non-empty front matter description directly", () => {
+    const result = resolveDescription("手写摘要。", "> 自动摘要\n\n正文", "测试");
+    expect(result).toBe("手写摘要。");
+  });
+
+  it("triggers auto-excerpt for empty-string description", () => {
+    const result = resolveDescription("", "> 自动摘要内容", "测试");
+    expect(result).toContain("自动摘要内容");
+    expect(result).not.toBe("");
+  });
+
+  it("triggers auto-excerpt for whitespace-only description", () => {
+    const result = resolveDescription("   ", "> 自动摘要内容", "测试");
+    expect(result).toContain("自动摘要内容");
+    expect(result).not.toBe("   ");
+  });
+
+  it("triggers auto-excerpt for null/undefined description", () => {
+    const result = resolveDescription(undefined, "> 自动摘要内容", "测试");
+    expect(result).toContain("自动摘要内容");
+  });
+
+  it("produces the correct excerpt for the current article body", () => {
+    const body = [
+      "> **核心思想：将“模型能想”转化为“系统能做”，让模型输出变成可控、可追踪、可恢复的系统动作。**",
+      "",
+      "## 目录",
+      "",
+      "- [一、可靠执行：重试、幂等与补偿](#一可靠执行重试幂等与补偿)",
+      "- [二、异步、流式、取消与恢复](#二异步流式取消与恢复)",
+      "- [三、Agent Runtime](#三agent-runtime)",
+      "- [四、Structured Outputs、Function Calling 与 JSON Mode](#四structured-outputsfunction-calling-与-json-mode)",
+      "- [五、MCP 与工具服务](#五mcp-与工具服务)",
+      "- [六、Correlation ID](#六correlation-id)",
+      "- [七、Agent Runtime 分层](#七agent-runtime-分层)",
+      "- [八、常见术语](#八常见术语)",
+      "",
+      "---",
+      "",
+      "## 一、可靠执行：重试、幂等与补偿"
+    ].join("\n");
+
+    const description = extractDescription(body, "Agent Runtime 与工具学习笔记");
+    expect(description).toContain("核心思想");
+    expect(description).not.toContain("目录");
+    expect(description).not.toContain("$1");
+    expect(description).not.toContain("可靠执行");
   });
 });
