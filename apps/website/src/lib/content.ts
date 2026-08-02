@@ -92,6 +92,43 @@ export function isDuplicateTitleHeading(title: string, heading: string): boolean
   return shorter.length >= 8 && longer.includes(shorter);
 }
 
+/**
+ * AST-based remark plugin that removes a leading H1 from the article body.
+ *
+ * The article page already renders the Front Matter `title` as the single page
+ * `<h1>`. If the body begins with its own H1, that node is a duplicated page
+ * title and is removed. Only the FIRST content node is inspected; later H1s,
+ * code blocks, and H2/H3 are untouched. No CSS hiding, no regex parsing.
+ */
+function remarkRemoveLeadingArticleH1() {
+  return (tree: { children?: Array<{ type?: string; depth?: number; value?: string }> }) => {
+    const children = tree.children ?? [];
+    let index = 0;
+    // Skip leading whitespace-only text / yaml front matter / empty nodes.
+    while (index < children.length) {
+      const node = children[index];
+      if (!node) break;
+      const isBlank =
+        (node.type === "text" || node.type === "html" || node.type === "yaml") &&
+        typeof node.value === "string" &&
+        node.value.trim() === "";
+      if (isBlank) {
+        index++;
+        continue;
+      }
+      break;
+    }
+    const first = children[index];
+    if (first && first.type === "heading" && first.depth === 1) {
+      children.splice(index, 1);
+    }
+  };
+}
+
+// remarkRemoveLeadingArticleH1 is a unified remark transformer; cast to satisfy
+// the unified plugin type overload.
+const remarkRemoveLeadingArticleH1Plugin = remarkRemoveLeadingArticleH1 as unknown as import("unified").Plugin;
+
 export function stripDuplicateTitleHeading(markdown: string, title: string): string {
   const lines = markdown.split(/\r?\n/);
   const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
@@ -176,15 +213,15 @@ export function getNotes(): NoteEntry[] {
     .sort((a, b) => (b.updated || b.date || "").localeCompare(a.updated || a.date || ""));
 }
 
-export async function renderNoteHtml(markdown: string, title: string): Promise<string> {
-  const content = stripDuplicateTitleHeading(markdown, title);
+export async function renderNoteHtml(markdown: string, _title: string): Promise<string> {
   const file = await unified()
     .use(remarkParse)
+    .use(remarkRemoveLeadingArticleH1Plugin)
     .use(remarkGfm)
     .use(remarkRehype)
     .use(rehypeSafeLinksAndAssets)
     .use(rehypeStringify)
-    .process(content);
+    .process(markdown);
   return String(file);
 }
 

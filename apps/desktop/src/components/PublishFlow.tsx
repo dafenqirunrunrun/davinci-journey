@@ -10,7 +10,7 @@ import {
   type ArchiveProfileChange,
   type NewArchiveProfileInput
 } from "@davinci-journey/classification";
-import { parseMarkdown } from "@davinci-journey/markdown-core";
+import { normalizeLeadingTitleHeading, parseMarkdown } from "@davinci-journey/markdown-core";
 import { initialArchiveProfiles } from "../archiveProfiles";
 import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DesktopBridge, type PrePublishCheckResult, type PublishLockStatus, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
@@ -301,18 +301,28 @@ export function PublishFlow() {
     }
     setDraft((current) => ({ ...current, status: "generating_workspace", error: undefined }));
     try {
+      // Normalize the leading H1 in the publish OUTPUT copy only.
+      // The original source markdown (and its fingerprint) is never modified.
+      const hasTitle = Boolean(draft.article.title?.trim());
+      const normalizedContent = normalizeLeadingTitleHeading(draft.source.markdownFile.content, hasTitle);
+      const removedLeadingH1 = normalizedContent !== draft.source.markdownFile.content;
+
       const result = await bridge.generatePublishWorkspace({
         repositoryRoot: repoRoot,
         sourceMarkdownPath: draft.source.markdownFile.absolutePath,
         sourceFingerprint: (draft.source.markdownFile as SelectedMarkdownFileDto).sourceFingerprint,
-        markdownContent: draft.source.markdownFile.content,
+        markdownContent: normalizedContent,
         article: draft.article,
         archiveProfile: selectedProfile,
         imageReferences: draft.source.parsedDocument.imageReferences,
         dependencies: draft.assets.dependencies,
         pendingArchiveProfiles: draft.archive.pendingProfileChanges.filter((change) => change.type === "create").map((change) => change.profile)
       });
-      setDraft((current) => updatePreview({ ...current, status: "workspace_ready", preview: { ...current.preview, workspaceResult: result } }, profiles));
+      setDraft((current) => updatePreview({
+        ...current,
+        status: "workspace_ready",
+        preview: { ...current.preview, workspaceResult: result, leadingTitleRemoved: removedLeadingH1 }
+      }, profiles));
     } catch (error) {
       setDraft((current) => ({ ...current, status: "failed", error: desktopErrorMessage(error) }));
     }
@@ -696,6 +706,11 @@ export function PublishFlow() {
             <PathBlock key={c.profile.id} title={`新建：${c.profile.name}`} value={`${c.profile.name} → ${c.profile.directory}`} pre />
           ))}
           {draft.error && <p className="error-message">{draft.error}</p>}
+          {draft.preview.leadingTitleRemoved && (
+            <p className="info-text" data-testid="leading-title-removed">
+              已自动移除正文重复一级标题，页面标题将使用 Front Matter title。
+            </p>
+          )}
           {draft.preview.workspaceResult && <WorkspaceResult bridge={bridge} result={draft.preview.workspaceResult} onDiscard={() => void discardWorkspace()} onRegenerate={() => void generateWorkspace()} />}
           <div className="actions">
             <button className="secondary-button" type="button" onClick={() => setStep(4)}>

@@ -109,6 +109,8 @@ export interface PublishDraft {
     assetDirectory?: string;
     workspacePlan?: PublishWorkspacePlan;
     workspaceResult?: GeneratePublishWorkspaceResult;
+    /** 发布输出是否自动移除了正文开头的重复一级标题。 */
+    leadingTitleRemoved?: boolean;
   };
   repository: RepositoryPublishState;
   status: PublishStatus;

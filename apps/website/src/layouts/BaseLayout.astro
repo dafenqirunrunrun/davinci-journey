@@ -66,6 +66,12 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
     --border: rgba(0, 0, 0, 0.08);
     --accent: #0071e3;
     --accent-soft: #eaf3ff;
+    --text-primary: #1d1d1f;
+    --text-secondary: #6e6e73;
+    --surface-subtle: #f5f5f7;
+    --surface-code: rgba(0, 0, 0, 0.05);
+    --border-subtle: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.16);
   }
 
   :root[data-theme="dark"] {
@@ -77,6 +83,12 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
     --border: rgba(255, 255, 255, 0.12);
     --accent: #2997ff;
     --accent-soft: rgba(41, 151, 255, 0.16);
+    --text-primary: #f5f5f7;
+    --text-secondary: #a1a1a6;
+    --surface-subtle: #1d1d1f;
+    --surface-code: rgba(255, 255, 255, 0.08);
+    --border-subtle: rgba(255, 255, 255, 0.12);
+    --border-strong: rgba(255, 255, 255, 0.24);
   }
 
   * {
@@ -226,9 +238,9 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
   .prose {
     max-width: 760px;
     margin: 0 auto;
-    color: var(--text);
-    font-size: 17px;
-    line-height: 1.82;
+    color: var(--text-primary);
+    font-size: clamp(1rem, 0.96rem + 0.2vw, 1.125rem);
+    line-height: 1.85;
   }
 
   .prose > .meta:first-child {
@@ -237,72 +249,77 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
 
   .prose > h1:first-of-type {
     max-width: 760px;
-    margin-bottom: 16px;
-    font-size: clamp(32px, 5vw, 46px);
-    line-height: 1.18;
+    margin-bottom: 18px;
+    font-size: clamp(2.25rem, 4.5vw, 3.25rem);
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+    overflow-wrap: anywhere;
   }
 
   .prose .lead {
     margin-bottom: 18px;
-    font-size: 18px;
+    font-size: clamp(1rem, 0.96rem + 0.2vw, 1.125rem);
     line-height: 1.72;
+    color: var(--text-secondary);
   }
 
   .prose h1,
   .prose h2,
-  .prose h3 {
+  .prose h3,
+  .prose h4 {
     max-width: 760px;
     letter-spacing: 0;
-  }
-
-  .prose h1 {
-    margin: 42px 0 16px;
-    font-size: 34px;
-    line-height: 1.24;
-  }
-
-  .prose h2 {
-    margin: 38px 0 14px;
-    font-size: 25px;
-    line-height: 1.32;
-  }
-
-  .prose h3 {
-    margin: 30px 0 12px;
-    font-size: 20px;
     line-height: 1.4;
   }
 
-  .prose p,
-  .prose ul,
-  .prose ol,
-  .prose blockquote,
-  .prose table,
-  .prose pre {
-    margin-bottom: 18px;
+  .prose h1 {
+    margin: 2.2em 0 0.9em;
+    font-size: clamp(2rem, 4vw, 2.75rem);
+    line-height: 1.25;
+  }
+
+  .prose h2 {
+    margin: 2em 0 0.85em;
+    font-size: clamp(1.65rem, 3vw, 2.15rem);
+  }
+
+  .prose h3 {
+    margin: 1.6em 0 0.7em;
+    font-size: clamp(1.25rem, 2vw, 1.55rem);
+  }
+
+  .prose h4 {
+    margin: 1.4em 0 0.6em;
+    font-size: 1.1rem;
+  }
+
+  .prose p {
+    margin-block: 1.1em;
   }
 
   .prose ul,
   .prose ol {
-    padding-left: 1.4em;
+    padding-inline-start: 1.5rem;
+    margin-block: 1.1rem;
   }
 
   .prose li + li {
-    margin-top: 6px;
+    margin-top: 0.45rem;
   }
 
   .prose blockquote {
-    margin-left: 0;
-    margin-right: 0;
-    border-left: 3px solid var(--accent);
-    color: var(--muted);
-    background: var(--surface);
-    border-radius: 0 12px 12px 0;
-    padding: 14px 18px;
+    margin: 1.75rem 0;
+    padding: 0.2rem 0 0.2rem 1.25rem;
+    border-left: 3px solid var(--border-strong);
+    color: var(--text-secondary);
   }
 
   .prose blockquote p:last-child {
     margin-bottom: 0;
+  }
+
+  .prose blockquote p {
+    margin-block: 0.55em;
   }
 
   .prose table {
@@ -310,49 +327,51 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
     width: 100%;
     overflow-x: auto;
     border-collapse: collapse;
-    font-size: 15px;
+    margin: 1.75rem 0;
+    font-size: 0.95em;
   }
 
   .prose th,
   .prose td {
-    border: 1px solid var(--border);
-    padding: 10px 12px;
+    min-width: 8rem;
+    padding: 0.75rem 0.9rem;
+    border-bottom: 1px solid var(--border-subtle);
     text-align: left;
     vertical-align: top;
   }
 
   .prose th {
-    background: var(--surface);
-    font-weight: 650;
+    background: var(--surface-subtle);
+    font-weight: 600;
   }
 
-  .prose code {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--surface);
+  .prose :not(pre) > code {
+    padding: 0.15em 0.4em;
+    border-radius: 0.4rem;
+    background: var(--surface-code);
     font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
     font-size: 0.9em;
-    padding: 0.12em 0.38em;
   }
 
   .prose pre {
     overflow-x: auto;
     border: 1px solid var(--border);
-    border-radius: 16px;
+    border-radius: 12px;
     background: var(--surface);
-    padding: 16px;
+    padding: 1rem 1.1rem;
+    font-size: 0.92em;
+    line-height: 1.6;
   }
 
   .prose pre code {
-    border: 0;
     background: transparent;
     padding: 0;
   }
 
   .prose hr {
-    margin: 34px 0;
+    margin: 3rem 0;
     border: 0;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--border-subtle);
   }
 
   .prose img {
