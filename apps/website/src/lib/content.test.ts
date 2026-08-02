@@ -3,8 +3,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   extractDescription,
+  getNotes,
   renderNoteHtml,
   resolveDescription,
+  sortNotesDescending,
   stripDuplicateTitleHeading
 } from "./content";
 
@@ -259,5 +261,48 @@ describe("auto excerpt generation (empty description)", () => {
     expect(description).not.toContain("目录");
     expect(description).not.toContain("$1");
     expect(description).not.toContain("可靠执行");
+  });
+});
+
+describe("homepage data layer", () => {
+  it("sorts notes newest-first by updated then date", () => {
+    const notes = [
+      { title: "old", updated: "2026-01-01" },
+      { title: "newest", updated: "2026-06-01" },
+      { title: "dateOnly", date: "2026-03-15" },
+      { title: "noDate" }
+    ];
+    const sorted = [...notes].sort(sortNotesDescending);
+    expect(sorted[0]!.title).toBe("newest");
+    expect(sorted[1]!.title).toBe("dateOnly");
+    expect(sorted[2]!.title).toBe("old");
+    expect(sorted[3]!.title).toBe("noDate");
+  });
+
+  it("reads the featured flag from front matter", () => {
+    const notes = getNotes();
+    const article = notes.find((n) => n.slug === "agent-runtime-7");
+    expect(article).toBeDefined();
+    // Current article has featured: false in its front matter.
+    expect(article?.featured).toBe(false);
+    expect(typeof article?.featured).toBe("boolean");
+  });
+
+  it("getNotes returns the published article with a clean description", () => {
+    const notes = getNotes();
+    const article = notes.find((n) => n.slug === "agent-runtime-7");
+    expect(article?.description).toContain("系统梳理 Agent Runtime");
+    expect(article?.description).not.toContain("$1");
+    expect(article?.description).not.toContain("目录");
+  });
+
+  it("getNotes is sorted newest-first", () => {
+    const notes = getNotes();
+    expect(notes.length).toBeGreaterThan(0);
+    for (let i = 1; i < notes.length; i++) {
+      const prev = notes[i - 1]!;
+      const curr = notes[i]!;
+      expect((prev.updated || prev.date || "").localeCompare(curr.updated || curr.date || "")).toBeGreaterThanOrEqual(0);
+    }
   });
 });

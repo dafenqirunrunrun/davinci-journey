@@ -37,6 +37,7 @@ export interface NoteEntry {
   tags: string[];
   date?: string;
   updated?: string;
+  featured: boolean;
   sourcePath: string;
   urlPath: string;
   body: string;
@@ -305,13 +306,22 @@ export function getNotes(): NoteEntry[] {
         tags: Array.isArray(frontMatter.tags) ? frontMatter.tags : [],
         date: frontMatter.date,
         updated: frontMatter.updated,
+        featured: frontMatter.featured === true,
         sourcePath,
         urlPath: `/notes/${slug}/`,
         body
       };
     })
     .filter((note) => note.slug && !note.sourcePath.includes("fixtures/"))
-    .sort((a, b) => (b.updated || b.date || "").localeCompare(a.updated || a.date || ""));
+    .sort(sortNotesDescending);
+}
+
+/**
+ * Sort notes newest-first by `updated`, falling back to `date`.
+ * Exposed for testing the homepage's "最新笔记" ordering.
+ */
+export function sortNotesDescending<T extends { updated?: string; date?: string }>(a: T, b: T): number {
+  return (b.updated || b.date || "").localeCompare(a.updated || a.date || "");
 }
 
 export async function renderNoteHtml(markdown: string, _title: string): Promise<string> {

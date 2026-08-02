@@ -1,5 +1,5 @@
 export const SITE_NAME = "达芬奇的奇妙之旅";
-export const SITE_DESCRIPTION = "记录 AI Agent、RAG、LLM 应用开发与工程实践";
+export const SITE_DESCRIPTION = "记录 AI Agent、RAG 与 LLM 应用开发中的思考、实验与工程经验。";
 export const SITE_ORIGIN = "https://dafenqirunrunrun.github.io";
 export const REPOSITORY_URL = "https://github.com/dafenqirunrunrun/davinci-journey";
 
