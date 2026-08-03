@@ -8,7 +8,7 @@
     "lint": "astro-check && tsc -p tsconfig.json --noEmit",
     "typecheck": "astro-check && tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
-    "build": "astro-check && astro build"
+    "build": "astro-check && astro build && node scripts/copy-notes-assets.mjs"
   },
   "dependencies": {
     "astro": "^4.15.9",
