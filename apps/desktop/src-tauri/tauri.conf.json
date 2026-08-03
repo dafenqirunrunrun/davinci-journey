@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "达芬奇的奇妙之旅",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.davinci.journey",
   "build": {
     "beforeDevCommand": "pnpm exec vite --host 127.0.0.1 --port 4174",
@@ -14,7 +14,9 @@
       {
         "title": "达芬奇的奇妙之旅",
         "width": 1200,
-        "height": 820
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 640
       }
     ],
     "security": {
@@ -22,7 +24,23 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["nsis"],
+    "category": "DeveloperTool",
+    "shortDescription": "达芬奇的奇妙之旅 - 本地 Markdown 笔记发布工具",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "达芬奇的奇妙之旅"
+      }
+    }
   }
 }
