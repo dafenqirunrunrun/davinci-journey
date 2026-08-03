@@ -17,7 +17,13 @@ import { canContinueFromAssets, emptyDraft, type PublishDraft, type RemotePublis
 import { getPublishWriteEligibility, publishWriteBlockReasonText } from "../publishWriteEligibility";
 
 const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览工作区", "写入并提交", "推送与上线"];
-const today = "2026-07-30";
+// 使用本地当前日期（YYYY-MM-DD），而不是写死某个日期。
+function currentDate(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+const today = currentDate();
 
 const emptyForm: NewArchiveProfileInput = {
   name: "",
