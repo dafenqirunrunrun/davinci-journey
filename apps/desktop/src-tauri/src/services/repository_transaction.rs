@@ -75,7 +75,7 @@ pub struct PublishLockStatus {
     pub message: Option<String>,
 }
 
-const TRANSACTIONS_DIR: &str = ".publish-transactions";
+pub const TRANSACTIONS_DIR: &str = ".publish-transactions";
 const LOCK_FILE: &str = ".publish.lock";
 
 pub struct PublishLockGuard {
@@ -435,8 +435,13 @@ pub fn rollback_transaction(
         .iter()
         .map(|b| b.relative_path.as_str())
         .collect();
+    // Only remove files that were CREATED during this transaction. Files that
+    // existed before (Update) must never be deleted — if their backup is
+    // missing (e.g. failure before backup), they are left untouched.
     for change in &transaction.planned_changes {
-        if !backed_up.contains(change.relative_path.as_str()) {
+        if matches!(change.operation, FileOperation::Create)
+            && !backed_up.contains(change.relative_path.as_str())
+        {
             let target = repo_root.join(&change.relative_path);
             if target.exists() {
                 fs::remove_file(&target).map_err(|e| {
@@ -691,6 +696,52 @@ mod tests {
         atomic_write(&target, b"hello world").unwrap();
         assert!(target.exists());
         assert_eq!(fs::read_to_string(&target).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn rollback_never_deletes_update_files_without_backup() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        // Pre-existing config file (Update target).
+        fs::create_dir_all(repo.join("config")).unwrap();
+        fs::write(
+            repo.join("config/archive-profiles.yml"),
+            "# original config",
+        )
+        .unwrap();
+
+        // A transaction whose only planned change is an Update with NO backup
+        // (simulates failure before a backup was taken).
+        let tx = RepositoryPublishTransaction {
+            transaction_id: "tx-nobackup".to_string(),
+            workspace_id: "ws".to_string(),
+            repository_root: repo.to_string_lossy().to_string(),
+            operation: "update".to_string(),
+            planned_changes: vec![RepositoryFileChange {
+                relative_path: "config/archive-profiles.yml".to_string(),
+                operation: FileOperation::Update,
+                size: 10,
+                sha256: "pending".to_string(),
+            }],
+            backups: vec![],
+            status: TransactionStatus::Failed,
+            created_at: "2026-08-01T00:00:00Z".to_string(),
+        };
+
+        rollback_transaction(repo, &tx).unwrap();
+
+        // The pre-existing Update file must NOT be deleted.
+        let config = repo.join("config/archive-profiles.yml");
+        assert!(
+            config.exists(),
+            "Update file without backup must not be deleted on rollback"
+        );
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "# original config",
+            "Update file content must be preserved"
+        );
     }
 
     #[test]

@@ -668,3 +668,97 @@ fn e2e_stale_publish_lock_can_be_cleaned_safely() {
     assert_eq!(cleaned.state, PublishLockState::Missing);
     assert!(dir.path().join("private.md").exists());
 }
+
+/// Regression: applying a workspace with a NEW archive profile must not treat
+/// config/archive-profiles.yml as a "copy from workspace" file.
+#[test]
+fn e2e_apply_workspace_with_new_archive_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    init_test_repo(dir.path());
+
+    // Existing archive config.
+    let config_dir = dir.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("archive-profiles.yml"),
+        "archiveProfiles:\n  - id: existing\n    name: Existing\n    category: Other\n    topic: T\n    directory: content/other\n    defaultTags: []\n",
+    )
+    .unwrap();
+
+    // Create workspace with a markdown file.
+    let ws_id = uuid::Uuid::new_v4().to_string();
+    let ws_root = dir.path().join(".publish-workspaces").join(&ws_id);
+    let ws_content = ws_root.join("content/ai-agent/langgraph");
+    fs::create_dir_all(&ws_content).unwrap();
+    fs::write(
+        ws_content.join("new-note.md"),
+        "---\ntitle: New Note\nslug: new-note\n---\n\n# New Note\n",
+    )
+    .unwrap();
+    let src = dir.path().join("sources/source.md");
+    fs::create_dir_all(src.parent().unwrap()).unwrap();
+    fs::write(&src, "# New Note").unwrap();
+    let src_fp = {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(fs::read(&src).unwrap()))
+    };
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "workspace_id": ws_id,
+        "created_at": "2026-07-30T10:00:00Z",
+        "source_markdown_path": src.to_string_lossy().to_string(),
+        "target_markdown_path": "content/ai-agent/langgraph/new-note.md",
+        "target_asset_directory": "public/assets/notes/new-note",
+        "archive_profile_id": "new-profile",
+        "source_fingerprint": src_fp,
+        "planned_changes": ["content/ai-agent/langgraph/new-note.md"],
+        "assets": []
+    });
+    fs::write(
+        ws_root.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    // Apply with a NEW archive profile change.
+    let result = davinci_journey_desktop::services::repository_publish::apply_publish_workspace(
+        ApplyWorkspaceRequest {
+            repository_root: dir.path().to_string_lossy().to_string(),
+            workspace_id: ws_id,
+            operation: "create".to_string(),
+            archive_profile_changes: vec![
+                davinci_journey_desktop::services::repository_publish::ArchiveProfileEntryDto {
+                    id: "new-profile".to_string(),
+                    name: "AI Agent / New".to_string(),
+                    category: "AI Agent".to_string(),
+                    topic: Some("New".to_string()),
+                    directory: "content/ai-agent/new".to_string(),
+                    default_tags: vec!["AI Agent".to_string()],
+                    description: None,
+                },
+            ],
+        },
+    );
+
+    assert!(
+        result.is_ok(),
+        "apply should succeed with a new archive profile: {:?}",
+        result.err()
+    );
+
+    // The new profile must have been written into the config.
+    let config = fs::read_to_string(config_dir.join("archive-profiles.yml")).unwrap();
+    assert!(
+        config.contains("new-profile"),
+        "config should contain the new profile"
+    );
+    assert!(
+        config.contains("existing"),
+        "config should preserve existing profile"
+    );
+
+    // The markdown must have been written.
+    let target = dir.path().join("content/ai-agent/langgraph/new-note.md");
+    assert!(target.exists(), "markdown should be written to repo");
+}
