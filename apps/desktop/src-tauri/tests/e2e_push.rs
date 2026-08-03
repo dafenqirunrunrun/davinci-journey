@@ -7,6 +7,7 @@ use std::process::Command;
 
 use davinci_journey_desktop::security::push_guard::{ahead_behind, sync_state, SyncState};
 use davinci_journey_desktop::services::git_remote::{push_publish, verify_remote_commit};
+use davinci_journey_desktop::services::git_repository;
 
 fn init_repo(dir: &Path) {
     Command::new("git")
@@ -160,6 +161,47 @@ fn e2e_remote_ahead_blocks_push_precheck() {
         behind
     );
     let _ = local_head;
+}
+
+/// Regression test for the full-hash push bug:
+/// `git_repository::commit` must return the FULL 40-char SHA so that the
+/// subsequent `push_publish` HEAD verification succeeds.
+#[test]
+fn e2e_commit_returns_full_hash_and_pushes() {
+    let work = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    init_repo(work.path());
+    add_bare_remote(work.path(), remote.path());
+
+    // Stage a file.
+    fs::create_dir_all(work.path().join("content")).unwrap();
+    fs::write(work.path().join("content/note.md"), "# Note").unwrap();
+    Command::new("git")
+        .args(["add", "content/note.md"])
+        .current_dir(work.path())
+        .output()
+        .unwrap();
+
+    // Commit via the app's own commit function.
+    let result = git_repository::commit(
+        work.path(),
+        "docs(test): add note",
+        &["content/note.md".to_string()],
+    )
+    .unwrap();
+
+    // The returned hash must be the FULL 40-char SHA (matches push verification).
+    assert_eq!(
+        result.commit_hash.len(),
+        40,
+        "commit_hash must be full SHA-1"
+    );
+    assert_eq!(result.short_hash, &result.commit_hash[..7]);
+
+    // Push using the returned (full) hash — this is what the GUI push does.
+    let outcome = push_publish(work.path(), "origin", "master", &result.commit_hash).unwrap();
+    assert_eq!(outcome.exit_code, 0);
+    assert!(verify_remote_commit(work.path(), "origin", "master", &result.commit_hash).unwrap());
 }
 
 #[test]

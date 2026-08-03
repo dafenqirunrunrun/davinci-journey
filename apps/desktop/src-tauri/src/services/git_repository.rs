@@ -174,10 +174,12 @@ pub fn commit(repo_root: &Path, message: &str, paths: &[String]) -> Result<Commi
         return Err(format!("Git commit 失败：{}", stderr.trim()));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let _stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
-    // Parse commit hash from output
-    let commit_hash_str = parse_commit_hash(&stdout).unwrap_or_default();
+    // Resolve the FULL commit hash via `git rev-parse HEAD`.
+    // Parsing git's confirmation output would only yield the abbreviated hash,
+    // which breaks later full-hash comparisons (e.g. push HEAD verification).
+    let commit_hash_str = crate::security::repository_guard::resolve_head(repo_root)?;
     let short_hash = if commit_hash_str.len() >= 7 {
         commit_hash_str[..7].to_string()
     } else if !commit_hash_str.is_empty() {
@@ -204,31 +206,6 @@ pub struct CommitResult {
     pub branch: String,
     pub message: String,
     pub committed_files: Vec<String>,
-}
-
-/// Parse commit hash from `git commit` output like:
-/// "[master (root-commit) abc1234] message"
-/// "[master abc1234] message"
-fn parse_commit_hash(git_output: &str) -> Option<String> {
-    // Look for pattern: "] " followed by a line, where the hash is before "]"
-    for line in git_output.lines() {
-        // Pattern: [branch (optional) hash] message
-        if let Some(start) = line.find('[') {
-            let rest = &line[start + 1..];
-            if let Some(end) = rest.find(']') {
-                let inner = &rest[..end];
-                // inner = "branch hash" or "branch (root-commit) hash"
-                let parts: Vec<&str> = inner.split_whitespace().collect();
-                // The hash is the last part before ']'
-                if let Some(&hash) = parts.last() {
-                    if hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                        return Some(hash.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Check whether the working tree has unstaged changes to specific files.
@@ -319,6 +296,21 @@ mod tests {
         .unwrap();
         assert!(!result.commit_hash.is_empty());
         assert_eq!(result.message, "docs(test): add test note");
+
+        // The commit hash must be the FULL 40-char SHA (used by push verification).
+        assert_eq!(
+            result.commit_hash.len(),
+            40,
+            "commit_hash must be full SHA-1"
+        );
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert_eq!(result.commit_hash, head, "commit_hash must match HEAD");
+        assert_eq!(result.short_hash, &head[..7]);
     }
 
     #[test]
@@ -326,21 +318,6 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
         assert!(commit(dir.path(), "", &["README.md".to_string()]).is_err());
-    }
-
-    #[test]
-    fn parses_commit_hash() {
-        let output = "[master (root-commit) abc1234def5678] initial commit\n 1 file changed\n";
-        assert_eq!(
-            parse_commit_hash(output),
-            Some("abc1234def5678".to_string())
-        );
-
-        let output2 = "[master abc1234def5678] second commit\n";
-        assert_eq!(
-            parse_commit_hash(output2),
-            Some("abc1234def5678".to_string())
-        );
     }
 
     #[test]
