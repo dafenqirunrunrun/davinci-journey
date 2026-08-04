@@ -29,8 +29,24 @@
 → 验证公开文章
 ```
 
+### 批量发布
+
+一次导入多篇笔记，逐篇审核后按队列顺序发布（每批最多 10 篇）：
+
+```
+选择多篇 Markdown（系统原生多选，最多 10 篇）
+→ 批量队列预览、排序、选择 / 跳过 / 移除
+→ 逐篇解析与审核（标题 / Slug / 摘要 / 标签 / 归档方案 / 图片检查）
+→ 队列预检（新建 / 更新 / 图片数 / Commit 数）
+→ 顺序写入并逐篇独立 Commit（失败即暂停，可重试 / 跳过）
+→ 整批一次 Push（复用远程 / 分支 / HEAD 安全检查）
+→ 跟踪 GitHub Pages 部署并输出批量发布报告
+```
+
 ### 主要能力
 
+- **批量发布**：多文件导入（最多 10 篇）、队列排序 / 选择 / 跳过、逐篇审核门禁、失败暂停与安全恢复、每篇独立 Commit、整批一次 Push、结果页查看公开文章
+- **重启恢复**：批量队列状态保存到本地应用数据目录，重启后可继续（仅存元数据与提交引用，不存 Markdown 正文 / Token / 图片二进制）
 - **Markdown 解析**：AST 级解析、Front Matter 读写、标准 / HTML / Obsidian 图片识别
 - **图片处理**：本地相对图片解析、MIME 与 SHA-256 校验、PNG/JPEG 转 WebP、SVG 安全校验
 - **原子化写入**：事务化写入正式仓库（Markdown + 图片 + 归档配置），失败自动回滚，不覆盖用户未提交修改
@@ -148,6 +164,8 @@ cargo test --all-targets --all-features
 - 临时 Git 仓库发布 E2E（`cargo test --test e2e_publish`）
 - 图片处理 E2E（PNG/JPEG → WebP，`cargo test --test image_e2e`）
 - 远程推送 E2E（本地 Bare Remote，`cargo test --test e2e_push`）
+- 批量发布 Bare Remote 回归（2 篇 2 Commit 1 Push + 失败恢复，`cargo test batch_`）
+- 批量发布组件测试（成功链路 / 失败重试 / 跳过 / 重启恢复 / 一次 Push，`test/BatchPublishFlow.test.tsx`）
 
 ---
 
