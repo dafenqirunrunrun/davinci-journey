@@ -334,7 +334,12 @@ function parseDateToSeconds(value: string | undefined): number | undefined {
 
 /**
  * Resolve the stable publish time (unix seconds):
- * front matter `publishedAt` → front matter `date` → first git commit → mtime.
+ * front matter `publishedAt` → `date` **when it carries a time** → first git
+ * commit → day-only `date` → mtime.
+ *
+ * A day-granular `date` (e.g. `2026-08-04`) cannot order notes published on
+ * the same day, so a fine-grained git first commit wins over it. A `date` that
+ * includes a time (e.g. an ISO datetime) is treated as authoritative.
  * Exposed for testing.
  */
 export function resolvePublishedAt(input: {
@@ -343,12 +348,13 @@ export function resolvePublishedAt(input: {
   gitFirstCommit?: number;
   mtime?: number;
 }): number | undefined {
-  return (
-    parseDateToSeconds(input.publishedAt) ??
-    parseDateToSeconds(input.date) ??
-    input.gitFirstCommit ??
-    input.mtime
-  );
+  const explicit = parseDateToSeconds(input.publishedAt);
+  if (explicit !== undefined) return explicit;
+  const dateHasTime = Boolean(input.date && /[T ]/.test(input.date));
+  const dateTime = parseDateToSeconds(input.date);
+  if (dateHasTime && dateTime !== undefined) return dateTime;
+  if (input.gitFirstCommit !== undefined) return input.gitFirstCommit;
+  return dateTime ?? input.mtime;
 }
 
 /**

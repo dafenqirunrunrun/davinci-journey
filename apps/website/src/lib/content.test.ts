@@ -408,11 +408,15 @@ describe("slug uniqueness gate", () => {
 });
 
 describe("time model", () => {
-  it("resolvePublishedAt prefers front matter publishedAt, then date, then git first commit, then mtime", () => {
+  it("resolvePublishedAt prefers explicit publishedAt, then time-bearing date, then git first commit, then day-only date, then mtime", () => {
     const explicit = Math.floor(Date.parse("2026-08-05") / 1000);
-    const date = Math.floor(Date.parse("2026-08-04") / 1000);
+    const dated = Math.floor(Date.parse("2026-08-04T18:15:03+08:00") / 1000);
+    // Explicit front matter publishedAt wins.
     expect(resolvePublishedAt({ publishedAt: "2026-08-05", date: "2026-08-04", gitFirstCommit: 100, mtime: 200 })).toBe(explicit);
-    expect(resolvePublishedAt({ date: "2026-08-04", gitFirstCommit: 100, mtime: 200 })).toBe(date);
+    // A date carrying a time is authoritative over git history.
+    expect(resolvePublishedAt({ date: "2026-08-04T18:15:03+08:00", gitFirstCommit: 100, mtime: 200 })).toBe(dated);
+    // A day-granular date cannot order same-day notes; git first commit wins.
+    expect(resolvePublishedAt({ date: "2026-08-04", gitFirstCommit: 100, mtime: 200 })).toBe(100);
     expect(resolvePublishedAt({ gitFirstCommit: 100, mtime: 200 })).toBe(100);
     expect(resolvePublishedAt({ mtime: 200 })).toBe(200);
     expect(resolvePublishedAt({})).toBeUndefined();
