@@ -469,8 +469,7 @@ pub fn cleanup_transaction(repo_root: &Path, transaction_id: &str) -> Result<(),
 
 #[cfg(target_os = "windows")]
 pub fn process_exists(pid: u32) -> bool {
-    use std::process::Command;
-    Command::new("tasklist")
+    crate::services::process_util::silent_command("tasklist")
         .args(["/FI", &format!("PID eq {}", pid), "/NH"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))

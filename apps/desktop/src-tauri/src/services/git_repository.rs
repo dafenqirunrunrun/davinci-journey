@@ -1,11 +1,10 @@
 use crate::security::git_pathspec::{build_pathspec_args, validate_pathspecs, SafePathspec};
 use std::path::Path;
-use std::process::Command;
 
 /// Run a git command with the given args in the repository root.
 /// Returns stdout on success, or a descriptive error on failure.
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -31,7 +30,7 @@ fn run_git_with_pathspecs(
         full_args.push(pa.as_str());
     }
 
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(&full_args)
         .current_dir(repo_root)
         .output()
@@ -64,7 +63,7 @@ pub fn get_new_file_diff(repo_root: &Path, path: &str) -> Result<String, String>
     let full_path = repo_root.join(&safe[0].relative_path);
     let full_path_str = full_path.to_string_lossy().replace('\\', "/");
 
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["diff", "--no-index", "/dev/null", &full_path_str])
         .current_dir(repo_root)
         .output()
@@ -85,7 +84,7 @@ pub fn stage_files(repo_root: &Path, paths: &[String]) -> Result<(), String> {
     let paths_args: Vec<&str> = validated.iter().map(|p| p.relative_path.as_str()).collect();
     args.extend(paths_args);
 
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(&args)
         .current_dir(repo_root)
         .output()
@@ -163,7 +162,7 @@ pub fn commit(repo_root: &Path, message: &str, paths: &[String]) -> Result<Commi
         args.push(p.relative_path.as_str());
     }
 
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(&args)
         .current_dir(repo_root)
         .output()
@@ -245,17 +244,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) {
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir)
             .output()
@@ -303,7 +302,7 @@ mod tests {
             40,
             "commit_hash must be full SHA-1"
         );
-        let head = Command::new("git")
+        let head = crate::services::process_util::silent_command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(dir.path())
             .output()

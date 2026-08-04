@@ -1763,7 +1763,6 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use tempfile::tempdir;
 
     fn png_bytes() -> Vec<u8> {
@@ -1789,17 +1788,17 @@ mod tests {
     }
 
     fn init_target_repo(dir: &Path) {
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.email", "test@davinci.test"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.name", "Davinci Test"])
             .current_dir(dir)
             .output()
@@ -1813,12 +1812,12 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("README.md"), "# Target Repo").unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "README.md", "config/archive-profiles.yml"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(dir)
             .output()

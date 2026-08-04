@@ -397,17 +397,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(dir: &std::path::Path) {
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init"])
             .current_dir(dir)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.email", "test@test.invalid"])
             .current_dir(dir)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir)
             .output()
@@ -416,18 +416,18 @@ mod tests {
 
     fn commit_file(dir: &std::path::Path, name: &str, content: &str, msg: &str) -> String {
         fs::write(dir.join(name), content).unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", name])
             .current_dir(dir)
             .output()
             .unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::services::process_util::silent_command("git")
             .args(["commit", "-m", msg])
             .current_dir(dir)
             .output()
             .unwrap();
         assert!(out.status.success());
-        let head = std::process::Command::new("git")
+        let head = crate::services::process_util::silent_command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(dir)
             .output()
@@ -440,12 +440,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let remote = tempdir().unwrap();
         init_repo(dir.path());
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init", "--bare"])
             .current_dir(remote.path())
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["remote", "add", "origin", remote.path().to_str().unwrap()])
             .current_dir(dir.path())
             .output()
@@ -466,12 +466,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let remote = tempdir().unwrap();
         init_repo(dir.path());
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init", "--bare"])
             .current_dir(remote.path())
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["remote", "add", "origin", remote.path().to_str().unwrap()])
             .current_dir(dir.path())
             .output()

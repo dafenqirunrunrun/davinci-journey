@@ -3,7 +3,6 @@
 //! Only the project's own remote is allowed as a push target.
 
 use std::path::Path;
-use std::process::Command;
 
 /// The expected GitHub owner/repo for the project's public remote.
 pub const EXPECTED_REPO_OWNER: &str = "dafenqirunrunrun";
@@ -31,7 +30,7 @@ pub enum RemoteCheck {
 
 /// Get a remote URL from the repository.
 pub fn get_remote_url(repo_root: &Path, remote_name: &str) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["remote", "get-url", remote_name])
         .current_dir(repo_root)
         .output()
@@ -154,17 +153,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) {
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.email", "test@test.invalid"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir)
             .output()
@@ -222,7 +221,7 @@ mod tests {
     fn remote_mismatch_rejected() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args([
                 "remote",
                 "add",
@@ -241,7 +240,7 @@ mod tests {
     fn matching_remote_accepted() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args([
                 "remote",
                 "add",
@@ -262,7 +261,7 @@ mod tests {
         // shows untracked files never affect remote checks.
         let dir = tempdir().unwrap();
         init_repo(dir.path());
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args([
                 "remote",
                 "add",

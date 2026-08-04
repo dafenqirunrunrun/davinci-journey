@@ -8,7 +8,6 @@ use crate::security::repository_guard::{
     current_branch, resolve_head, verify_no_operation_in_progress,
 };
 use std::path::Path;
-use std::process::Command;
 
 /// The branch that is allowed to be pushed for publishing.
 pub const PUBLISH_BRANCH: &str = "master";
@@ -33,7 +32,7 @@ pub fn ahead_behind(
     local_ref: &str,
 ) -> Result<(usize, usize), String> {
     let rev = format!("{}...{}", remote_ref, local_ref);
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["rev-list", "--left-right", "--count", &rev])
         .current_dir(repo_root)
         .output()
@@ -67,7 +66,7 @@ pub fn ahead_behind(
 
 /// Count commits reachable from a local ref (for the empty-remote case).
 fn local_commit_count(repo_root: &Path, local_ref: &str) -> Result<usize, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["rev-list", "--count", local_ref])
         .current_dir(repo_root)
         .output()
@@ -138,7 +137,7 @@ pub fn verify_push_eligible(
 
 /// Check that untracked files exist (informational, never blocks).
 pub fn untracked_file_count(repo_root: &Path) -> Result<usize, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["status", "--porcelain"])
         .current_dir(repo_root)
         .output()
@@ -157,17 +156,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) {
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.email", "test@test.invalid"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir)
             .output()
@@ -176,18 +175,18 @@ mod tests {
 
     fn commit_file(dir: &Path, name: &str, content: &str, msg: &str) -> String {
         fs::write(dir.join(name), content).unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", name])
             .current_dir(dir)
             .output()
             .unwrap();
-        let out = Command::new("git")
+        let out = crate::services::process_util::silent_command("git")
             .args(["commit", "-m", msg])
             .current_dir(dir)
             .output()
             .unwrap();
         assert!(out.status.success());
-        let head = Command::new("git")
+        let head = crate::services::process_util::silent_command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(dir)
             .output()
@@ -197,12 +196,12 @@ mod tests {
 
     /// Set up a bare remote and add it as `origin`.
     fn setup_remote(dir: &Path, remote_dir: &Path) {
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init", "--bare"])
             .current_dir(remote_dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["remote", "add", "origin", remote_dir.to_str().unwrap()])
             .current_dir(dir)
             .output()
@@ -240,7 +239,7 @@ mod tests {
         init_repo(dir.path());
         setup_remote(dir.path(), remote.path());
         let head = commit_file(dir.path(), "a.md", "a", "a");
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["push", "origin", "HEAD:refs/heads/master"])
             .current_dir(dir.path())
             .output()
@@ -265,7 +264,7 @@ mod tests {
         init_repo(dir.path());
         setup_remote(dir.path(), remote.path());
         commit_file(dir.path(), "a.md", "a", "a");
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["push", "origin", "HEAD:refs/heads/master"])
             .current_dir(dir.path())
             .output()
@@ -273,7 +272,7 @@ mod tests {
 
         // Make a commit in the remote via a second clone.
         let clone_dir = tempdir().unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args([
                 "clone",
                 remote.path().to_str().unwrap(),
@@ -283,24 +282,24 @@ mod tests {
             .output()
             .unwrap();
         fs::write(clone_dir.path().join("remote.md"), "remote change").unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "remote.md"])
             .current_dir(clone_dir.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["commit", "-m", "remote commit"])
             .current_dir(clone_dir.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["push", "origin", "HEAD:refs/heads/master"])
             .current_dir(clone_dir.path())
             .output()
             .unwrap();
 
         // Fetch to update origin/master tracking ref.
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["fetch", "origin"])
             .current_dir(dir.path())
             .output()

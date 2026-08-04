@@ -3,7 +3,6 @@
 //! Degrades gracefully when `gh` is unavailable or unauthenticated.
 
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 pub const DEPLOY_WORKFLOW_NAME: &str = "Deploy Pages";
 
@@ -42,12 +41,16 @@ pub enum GhAvailability {
 
 /// Check whether `gh` exists and is authenticated. Never prints tokens.
 pub fn check_gh() -> GhAvailability {
-    let which = Command::new("gh").arg("--version").output();
+    let which = crate::services::process_util::silent_command("gh")
+        .arg("--version")
+        .output();
     if which.is_err() {
         return GhAvailability::NotInstalled;
     }
 
-    let auth = Command::new("gh").args(["auth", "status"]).output();
+    let auth = crate::services::process_util::silent_command("gh")
+        .args(["auth", "status"])
+        .output();
     match auth {
         Ok(out) if out.status.success() => GhAvailability::Available,
         Ok(_) => GhAvailability::NotAuthenticated("gh 已安装但未登录。".to_string()),
@@ -69,7 +72,7 @@ pub fn list_runs_for_commit(
         return Err(GhAvailability::NotAuthenticated("gh 未登录。".to_string()));
     }
 
-    let output = Command::new("gh")
+    let output = crate::services::process_util::silent_command("gh")
         .args([
             "run",
             "list",
@@ -117,7 +120,7 @@ pub fn get_run_status(run_id: i64) -> Result<WorkflowRun, GhAvailability> {
         return Err(GhAvailability::NotInstalled);
     }
 
-    let output = Command::new("gh")
+    let output = crate::services::process_util::silent_command("gh")
         .args([
             "run",
             "view",

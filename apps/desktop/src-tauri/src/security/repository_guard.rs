@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Snapshot of the git repository state before any publish operation.
 #[derive(Debug, Clone)]
@@ -42,7 +41,7 @@ impl GitChange {
 
 /// Check that `dir` is inside a git repository and return its root.
 pub fn find_repository_root(dir: &Path) -> Result<PathBuf, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir)
         .output()
@@ -70,7 +69,7 @@ pub fn resolve_head(repo_root: &Path) -> Result<String, String> {
 /// Run `git rev-parse --abbrev-ref HEAD` to get the branch name.
 /// Returns None if HEAD is detached.
 pub fn current_branch(repo_root: &Path) -> Result<Option<String>, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(repo_root)
         .output()
@@ -102,7 +101,7 @@ pub fn check_operations_in_progress(repo_root: &Path) -> (bool, bool, bool, bool
 
 /// Run `git status --porcelain` and parse the output.
 pub fn parse_status(repo_root: &Path) -> Result<(Vec<GitChange>, Vec<String>), String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(["status", "--porcelain"])
         .current_dir(repo_root)
         .output()
@@ -325,7 +324,7 @@ pub fn verify_no_operation_in_progress(repo_root: &Path) -> Result<(), String> {
 }
 
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::services::process_util::silent_command("git")
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -346,17 +345,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) {
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["init"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(dir)
             .output()
@@ -374,12 +373,12 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("README.md"), "# Target").unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "README.md", "config/archive-profiles.yml"])
             .current_dir(dir)
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(dir)
             .output()
@@ -456,12 +455,12 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
         fs::write(dir.path().join("tracked.md"), "initial").unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "tracked.md"])
             .current_dir(dir.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(dir.path())
             .output()
@@ -469,7 +468,7 @@ mod tests {
 
         fs::write(dir.path().join("private.md"), "untracked").unwrap();
         fs::write(dir.path().join("staged.md"), "staged").unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "staged.md"])
             .current_dir(dir.path())
             .output()
@@ -492,12 +491,12 @@ mod tests {
         init_repo(dir.path());
         // Create a commit first so branch resolves
         std::fs::write(dir.path().join("test.md"), "# test").unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "test.md"])
             .current_dir(dir.path())
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(dir.path())
             .output()
@@ -534,12 +533,12 @@ mod tests {
         // initial repo has no commits yet, so HEAD may not resolve
         // let's create a commit first
         fs::write(dir.path().join("readme.md"), "# test").unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["add", "readme.md"])
             .current_dir(dir.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::services::process_util::silent_command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(dir.path())
             .output()
