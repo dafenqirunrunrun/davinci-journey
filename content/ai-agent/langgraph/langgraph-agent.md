@@ -5,7 +5,7 @@ date: "2026-08-04"
 description: ""
 draft: false
 featured: false
-slug: "agent"
+slug: "langgraph-agent"
 title: "agent 框架"
 topic: "LangGraph"
 updated: "2026-08-04"

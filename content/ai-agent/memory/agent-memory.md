@@ -5,7 +5,7 @@ date: "2026-08-04"
 description: ""
 draft: false
 featured: false
-slug: "agent"
+slug: "agent-memory"
 title: "Agent记忆系统"
 topic: "Memory"
 updated: "2026-08-04"

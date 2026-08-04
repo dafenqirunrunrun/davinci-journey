@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  assertUniqueNoteSlugs,
   extractDescription,
   getNotes,
   getRecentNotes,
@@ -340,5 +341,62 @@ describe("homepage data layer", () => {
   it("getRecentNotes returns all notes when fewer than the limit", () => {
     const notes = [{ title: "a", updated: "2026-01-01" }];
     expect(getRecentNotes(notes, 4)).toHaveLength(1);
+  });
+});
+
+describe("slug uniqueness gate", () => {
+  it("throws on duplicate slugs and lists every conflicting file", () => {
+    const notes = [
+      { slug: "agent", sourcePath: "content/ai-agent/langgraph/agent.md" },
+      { slug: "agent", sourcePath: "content/ai-agent/memory/agent.md" },
+      { slug: "agent", sourcePath: "content/rag/retrieval/agent.md" },
+      { slug: "unique", sourcePath: "content/other/uncategorized/unique.md" }
+    ];
+    expect(() => assertUniqueNoteSlugs(notes)).toThrow(/Duplicate note slug: agent/);
+    try {
+      assertUniqueNoteSlugs(notes);
+    } catch (error) {
+      const message = String((error as Error).message);
+      expect(message).toContain("content/ai-agent/langgraph/agent.md");
+      expect(message).toContain("content/ai-agent/memory/agent.md");
+      expect(message).toContain("content/rag/retrieval/agent.md");
+    }
+  });
+
+  it("treats case variants as the same slug", () => {
+    expect(() =>
+      assertUniqueNoteSlugs([
+        { slug: "Agent", sourcePath: "content/a.md" },
+        { slug: "agent", sourcePath: "content/b.md" }
+      ])
+    ).toThrow(/Duplicate note slug/);
+  });
+
+  it("treats whitespace and URL-encoding variants as the same slug", () => {
+    expect(() =>
+      assertUniqueNoteSlugs([
+        { slug: "my note", sourcePath: "content/a.md" },
+        { slug: "my%20note", sourcePath: "content/b.md" }
+      ])
+    ).toThrow(/Duplicate note slug/);
+  });
+
+  it("passes when all slugs are unique", () => {
+    expect(() =>
+      assertUniqueNoteSlugs([
+        { slug: "langgraph-agent", sourcePath: "content/a.md" },
+        { slug: "agent-memory", sourcePath: "content/b.md" },
+        { slug: "agent", sourcePath: "content/c.md" }
+      ])
+    ).not.toThrow();
+  });
+
+  it("getNotes yields one note per unique slug (no duplicate page URLs)", () => {
+    const notes = getNotes();
+    const slugs = notes.map((note) => note.slug);
+    expect(new Set(slugs).size).toBe(notes.length);
+    // Every rendered page maps to a unique URL.
+    const urls = notes.map((note) => note.urlPath);
+    expect(new Set(urls).size).toBe(notes.length);
   });
 });

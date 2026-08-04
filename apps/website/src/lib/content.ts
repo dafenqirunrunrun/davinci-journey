@@ -309,9 +309,48 @@ function gitCommitTimestamp(relPath: string): number | undefined {
   }
 }
 
+/** Normalize a slug for uniqueness comparison: trim, URL-decode, lowercase. */
+function normalizeSlugKey(slug: string): string {
+  let decoded = slug;
+  try {
+    decoded = decodeURIComponent(slug);
+  } catch {
+    // Leave as-is when the slug contains an invalid percent-encoding.
+  }
+  return decoded.trim().toLowerCase();
+}
+
+/**
+ * Build gate: every rendered note must have a unique slug.
+ *
+ * Two notes sharing a slug would both target the same URL and silently
+ * overwrite each other (which one wins depends on traversal/sort order).
+ * Throwing here fails the build with the full conflict list instead.
+ *
+ * Drafts are included because the site currently renders drafts into the same
+ * URL namespace; if drafts are later excluded from rendering, narrow this to
+ * non-draft notes.
+ */
+export function assertUniqueNoteSlugs<T extends { slug: string; sourcePath: string }>(notes: T[]): void {
+  const seen = new Map<string, T[]>();
+  for (const note of notes) {
+    if (!note.slug) continue;
+    const key = normalizeSlugKey(note.slug);
+    const list = seen.get(key) ?? [];
+    list.push(note);
+    seen.set(key, list);
+  }
+  const conflicts = [...seen.entries()].filter(([, list]) => list.length > 1);
+  if (conflicts.length === 0) return;
+  const detail = conflicts
+    .map(([slug, list]) => `Duplicate note slug: ${slug}\n${list.map((note) => `- ${note.sourcePath}`).join("\n")}`)
+    .join("\n");
+  throw new Error(`Note slug conflicts detected — refusing to build.\n${detail}`);
+}
+
 export function getNotes(): NoteEntry[] {
   if (!statSync(contentDir).isDirectory()) return [];
-  return walkMarkdownFiles(contentDir)
+  const notes = walkMarkdownFiles(contentDir)
     .map((path) => {
       const raw = readFileSync(path, "utf8");
       const match = raw.match(frontMatterPattern);
@@ -337,8 +376,9 @@ export function getNotes(): NoteEntry[] {
         publishedAt: gitCommitTimestamp(sourcePath)
       };
     })
-    .filter((note) => note.slug && !note.sourcePath.includes("fixtures/"))
-    .sort(sortNotesDescending);
+    .filter((note) => note.slug && !note.sourcePath.includes("fixtures/"));
+  assertUniqueNoteSlugs(notes);
+  return notes.sort(sortNotesDescending);
 }
 
 /**
