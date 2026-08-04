@@ -124,6 +124,18 @@ fn e2e_remote_ahead_blocks_push_precheck() {
         .current_dir(work.path())
         .output()
         .unwrap();
+    // A fresh clone does not inherit the working repo's git identity; without it
+    // the `git commit` below fails on runners that have no global config.
+    Command::new("git")
+        .args(["config", "user.email", "test@test.invalid"])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
     fs::write(clone.path().join("remote.md"), "remote").unwrap();
     Command::new("git")
         .args(["add", "remote.md"])
