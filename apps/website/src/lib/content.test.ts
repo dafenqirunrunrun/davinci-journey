@@ -280,6 +280,18 @@ describe("homepage data layer", () => {
     expect(sorted[3]!.title).toBe("noDate");
   });
 
+  it("breaks date ties by publishedAt (git commit time, unix seconds)", () => {
+    const notes = [
+      { title: "older", updated: "2026-08-04", publishedAt: 1785830000 },
+      { title: "newer", updated: "2026-08-04", publishedAt: 1785840000 },
+      { title: "dateOnly", date: "2026-08-03" }
+    ];
+    const sorted = [...notes].sort(sortNotesDescending);
+    expect(sorted[0]!.title).toBe("newer");
+    expect(sorted[1]!.title).toBe("older");
+    expect(sorted[2]!.title).toBe("dateOnly");
+  });
+
   it("reads the featured flag from front matter", () => {
     const notes = getNotes();
     const article = notes.find((n) => n.slug === "agent-runtime-7");

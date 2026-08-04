@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +42,8 @@ export interface NoteEntry {
   sourcePath: string;
   urlPath: string;
   body: string;
+  /** Unix seconds of the file's last git commit — the "recently published" signal. */
+  publishedAt?: number;
 }
 
 export interface ArchiveProfile {
@@ -285,6 +288,27 @@ export function getArchiveProfiles(): ArchiveProfile[] {
   }));
 }
 
+/**
+ * Unix seconds of the last git commit touching a content file. This is the
+ * authoritative "recently published" signal: two notes may share the same
+ * Front Matter `date`/`updated`, but the git history records which was actually
+ * published last. Returns `undefined` when git is unavailable (e.g. a tarball
+ * build), in which case sorting falls back to `updated`/`date`.
+ */
+function gitCommitTimestamp(relPath: string): number | undefined {
+  try {
+    const out = execFileSync("git", ["log", "-1", "--format=%ct", "--", relPath], {
+      cwd: rootDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const value = Number(out);
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function getNotes(): NoteEntry[] {
   if (!statSync(contentDir).isDirectory()) return [];
   return walkMarkdownFiles(contentDir)
@@ -309,7 +333,8 @@ export function getNotes(): NoteEntry[] {
         featured: frontMatter.featured === true,
         sourcePath,
         urlPath: `/notes/${slug}/`,
-        body
+        body,
+        publishedAt: gitCommitTimestamp(sourcePath)
       };
     })
     .filter((note) => note.slug && !note.sourcePath.includes("fixtures/"))
@@ -317,11 +342,22 @@ export function getNotes(): NoteEntry[] {
 }
 
 /**
- * Sort notes newest-first by `updated`, falling back to `date`.
- * Exposed for testing the homepage's "最新笔记" ordering.
+ * Sort notes newest-first. Primary key is `publishedAt` (the last git commit
+ * time — the true publication order); when unavailable, fall back to
+ * `updated`, then `date`. Exposed for testing the homepage's "最新笔记" ordering.
  */
-export function sortNotesDescending<T extends { updated?: string; date?: string }>(a: T, b: T): number {
+export function sortNotesDescending<T extends { updated?: string; date?: string; publishedAt?: number }>(a: T, b: T): number {
+  // publishedAt is unix seconds; dateToTimestamp returns milliseconds — normalize to ms.
+  const aTime = a.publishedAt !== undefined ? a.publishedAt * 1000 : (dateToTimestamp(a.updated ?? a.date) ?? 0);
+  const bTime = b.publishedAt !== undefined ? b.publishedAt * 1000 : (dateToTimestamp(b.updated ?? b.date) ?? 0);
+  if (aTime !== bTime) return bTime - aTime;
   return (b.updated || b.date || "").localeCompare(a.updated || a.date || "");
+}
+
+function dateToTimestamp(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : undefined;
 }
 
 /**
