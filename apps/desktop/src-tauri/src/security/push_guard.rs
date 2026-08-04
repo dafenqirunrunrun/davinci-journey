@@ -281,6 +281,18 @@ mod tests {
             .current_dir(dir.path())
             .output()
             .unwrap();
+        // A fresh clone does not inherit the working repo's git identity; without
+        // it the `git commit` below fails on runners that have no global config.
+        crate::services::process_util::silent_command("git")
+            .args(["config", "user.email", "test@test.invalid"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        crate::services::process_util::silent_command("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
         fs::write(clone_dir.path().join("remote.md"), "remote change").unwrap();
         crate::services::process_util::silent_command("git")
             .args(["add", "remote.md"])
