@@ -102,4 +102,60 @@ describe("DesktopBridge", () => {
     expect((await bridge.selectMarkdownFile()).content).toBe("# A");
     expect((await bridge.selectMarkdownFile()).content).toBe("# B");
   });
+
+  it("browser batch selection returns metadata and filters non-markdown", async () => {
+    const multiPicker = () =>
+      Promise.resolve([
+        new File(["# A"], "a.md", { type: "text/markdown" }),
+        new File(["# B"], "b.markdown", { type: "text/markdown" }),
+        new File(["skip"], "c.txt", { type: "text/plain" })
+      ]);
+    const bridge = createBrowserBridge(() => Promise.resolve(undefined), multiPicker);
+    const selected = await bridge.selectMarkdownFiles();
+    expect(selected.map((item) => item.displayName)).toEqual(["a.md", "b.markdown"]);
+    expect(selected[0]?.size).toBeGreaterThan(0);
+  });
+
+  it("browser batch selection returns empty array when nothing is picked", async () => {
+    const bridge = createBrowserBridge(() => Promise.resolve(undefined), () => Promise.resolve([]));
+    await expect(bridge.selectMarkdownFiles()).resolves.toEqual([]);
+  });
+
+  it("browser batch readMarkdownPath is blocked in preview mode", async () => {
+    const bridge = createBrowserBridge(() => Promise.resolve(undefined));
+    await expect(bridge.readMarkdownPath({ path: "C:/notes/a.md" })).rejects.toMatchObject({
+      code: "WORKSPACE_CREATE_FAILED"
+    });
+  });
+
+  it("tauri batch commands are wired to the expected invoke calls", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const bridge = createTauriBridge();
+
+    await bridge.selectMarkdownFiles();
+    await bridge.readMarkdownPath({ path: "C:/notes/a.md", maxBytes: 1024 });
+    const persisted = {
+      batchId: "batch-1",
+      status: "reviewing" as const,
+      items: [],
+      completedCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      batchCommitHashes: [],
+      savedAt: "2026-08-04T00:00:00.000Z"
+    };
+    await bridge.saveBatchPublishState("batch-1", persisted);
+    await bridge.loadBatchPublishState("batch-1");
+    await bridge.listBatchPublishStates();
+    await bridge.deleteBatchPublishState("batch-1");
+
+    expect(invoke).toHaveBeenCalledWith("select_markdown_files", undefined);
+    expect(invoke).toHaveBeenCalledWith("read_markdown_path", { request: { path: "C:/notes/a.md", maxBytes: 1024 } });
+    expect(invoke).toHaveBeenCalledWith("save_batch_publish_state", { batchId: "batch-1", payload: persisted });
+    expect(invoke).toHaveBeenCalledWith("load_batch_publish_state", { batchId: "batch-1" });
+    expect(invoke).toHaveBeenCalledWith("list_batch_publish_states", undefined);
+    expect(invoke).toHaveBeenCalledWith("delete_batch_publish_state", { batchId: "batch-1" });
+    vi.doUnmock("@tauri-apps/api/core");
+  });
 });

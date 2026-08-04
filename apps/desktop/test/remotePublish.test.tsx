@@ -4,6 +4,19 @@ import { PublishFlow } from "../src/components/PublishFlow";
 
 const REPO = "D:/target-site";
 
+// A hoisted `vi.mock` (not `vi.doMock`) so every dynamic import of the Tauri
+// core resolves to a wrapper that delegates to whatever mock is installed for
+// the current test. This avoids the dynamic-import interception timing races
+// that made the flow flaky under repeated sequential awaits.
+const { mockHolder } = vi.hoisted(() => ({ mockHolder: { invoke: undefined as unknown as ((cmd: string, args?: Record<string, unknown>) => unknown) | undefined } }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (cmd: string, args?: Record<string, unknown>) => {
+    const fn = mockHolder.invoke;
+    if (!fn) throw new Error("No Tauri invoke mock installed for this test");
+    return fn(cmd, args);
+  }
+}));
+
 function markdownFile(content = "# LangGraph Checkpoint\n\n![图](./images/a.png)\n\nLangGraph checkpoint") {
   return new File([content], "checkpoint.md", { type: "text/markdown", lastModified: Date.UTC(2026, 6, 30) });
 }
@@ -132,38 +145,70 @@ function buildInvoke(overrides: Record<string, unknown> = {}) {
 }
 
 function setupTauri(invoke: ReturnType<typeof vi.fn>) {
+  mockHolder.invoke = invoke;
+  // Presence of __TAURI_INTERNALS__ makes hasTauriRuntime() choose the Tauri
+  // bridge; the invoke itself is served by the hoisted module mock.
   (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
-  vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+}
+
+/**
+ * The publish flow drives many sequential async steps through a mocked invoke.
+ * Under parallel test workers the default 1s waitFor window can be too short,
+ * producing load-dependent flakes, so use a longer, deterministic window here.
+ */
+async function waitForText(text: string, timeout = 10000) {
+  await waitFor(() => expect(screen.getByText(text)).toBeInTheDocument(), { timeout });
+}
+
+/** Wait for a button whose text is present but that may start disabled. */
+async function waitForEnabledButton(text: string) {
+  await waitFor(
+    () => {
+      const button = screen.getByText(text).closest("button");
+      expect(button).not.toBeNull();
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    },
+    { timeout: 10000 }
+  );
 }
 
 async function driveToStep7() {
   const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
   fireEvent.change(fileInput, { target: { files: [markdownFile()] } });
-  await waitFor(() => expect(screen.getByText("检查图片")).toBeInTheDocument());
+  await waitForText("检查图片");
   fireEvent.click(screen.getByText("下一步"));
   fireEvent.click(screen.getByText("下一步"));
   fireEvent.click(screen.getByText("下一步"));
   // Step 5: generate workspace
   fireEvent.click(screen.getByText("生成发布工作区"));
-  await waitFor(() => expect(screen.getByText("写入正式仓库")).toBeInTheDocument());
+  // The "写入正式仓库" button renders disabled until the workspace is ready;
+  // clicking it while disabled is a silent no-op, so wait until it is enabled.
+  await waitForEnabledButton("写入正式仓库");
   // Step 6: write + stage + commit
   fireEvent.click(screen.getByText("写入正式仓库"));
-  await waitFor(() => expect(screen.getByText("确认写入正式仓库")).toBeInTheDocument());
+  await waitForText("确认写入正式仓库");
   fireEvent.click(screen.getByText("确认写入正式仓库"));
-  await waitFor(() => expect(screen.getByText("准备提交")).toBeInTheDocument());
+  await waitForText("准备提交");
   fireEvent.click(screen.getByText("准备提交"));
-  await waitFor(() => expect(screen.getByText("确认创建本地 Commit")).toBeInTheDocument());
+  await waitForText("确认创建本地 Commit");
   fireEvent.click(screen.getByText("确认创建本地 Commit"));
-  await waitFor(() => expect(screen.getByText("推送到 GitHub")).toBeInTheDocument());
+  await waitForText("推送到 GitHub");
 }
 
 afterEach(() => {
   delete (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
-  vi.doUnmock("@tauri-apps/api/core");
+  mockHolder.invoke = undefined;
 });
 
 describe("remote publish flow (step 7)", () => {
-  it("本地 Commit 后进入第 7 步并最终显示公开发布成功", async () => {
+  // These tests drive a 7-step sequential flow through many awaited mock
+  // invokes. Under parallel fork load they need more than the global window, so
+  // give them a localized per-test timeout instead of inflating the global one.
+  function slowIt(name: string, fn: () => void | Promise<void>) {
+    return it(name, fn, 30000);
+  }
+
+  slowIt("本地 Commit 后进入第 7 步并最终显示公开发布成功", async () => {
     const { invoke, invocationLog } = buildInvoke();
     setupTauri(invoke);
     render(<PublishFlow />);
@@ -186,7 +231,7 @@ describe("remote publish flow (step 7)", () => {
     expect(invocationLog).toContain("verify_public_article_command");
   });
 
-  it("远程冲突时阻止推送", async () => {
+  slowIt("远程冲突时阻止推送", async () => {
     const { invoke } = buildInvoke({
       inspect_remote_publish_command: {
         remoteUrl: "https://github.com/dafenqirunrunrun/davinci-journey.git",
@@ -210,7 +255,7 @@ describe("remote publish flow (step 7)", () => {
     expect(invoke).not.toHaveBeenCalledWith("push_publish_commit_command", expect.anything());
   });
 
-  it("GitHub CLI 缺失时降级为 pushed", async () => {
+  slowIt("GitHub CLI 缺失时降级为 pushed", async () => {
     const { invoke } = buildInvoke({
       check_github_pages_deployment_command: { ghAvailable: false, phase: "not_started", ghMessage: "GitHub CLI 未安装。" },
       wait_github_pages_deployment_command: { ghAvailable: false, phase: "not_started", ghMessage: "GitHub CLI 未安装。" }
@@ -225,7 +270,7 @@ describe("remote publish flow (step 7)", () => {
     expect(screen.queryByText("公开发布成功")).not.toBeInTheDocument();
   });
 
-  it("发布成功后发布下一篇重置流程", async () => {
+  slowIt("发布成功后发布下一篇重置流程", async () => {
     const { invoke } = buildInvoke();
     setupTauri(invoke);
     render(<PublishFlow />);
@@ -238,7 +283,7 @@ describe("remote publish flow (step 7)", () => {
     await waitFor(() => expect(screen.getByText("选择 Markdown")).toBeInTheDocument());
   });
 
-  it("只有全部成功才显示公开发布成功（网站验证失败）", async () => {
+  slowIt("只有全部成功才显示公开发布成功（网站验证失败）", async () => {
     const { invoke } = buildInvoke({
       verify_public_article_command: { reachable: false, message: "页面内容不匹配。" }
     });
@@ -252,7 +297,7 @@ describe("remote publish flow (step 7)", () => {
     expect(screen.queryByText("公开发布成功")).not.toBeInTheDocument();
   });
 
-  it("push 失败不重复执行", async () => {
+  slowIt("push 失败不重复执行", async () => {
     const { invoke } = buildInvoke({
       push_publish_commit_command: () => { throw new Error("GIT_PUSH_FAILED: 推送失败"); }
     });

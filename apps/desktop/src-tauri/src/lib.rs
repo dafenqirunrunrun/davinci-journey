@@ -7,6 +7,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
+use tauri::Manager;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -32,6 +33,8 @@ use services::repository_transaction::PublishLockStatus;
 
 const MAX_MARKDOWN_SIZE: u64 = 10 * 1024 * 1024;
 const WORKSPACE_VERSION: u8 = 1;
+const MAX_BATCH_SELECTION: usize = 10;
+const MAX_BATCH_STATE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DesktopCommandError {
@@ -101,6 +104,15 @@ pub enum DesktopCommandError {
     PublicArticleVerifyTimeout,
     PublishAlreadyPushed,
     PublishResetFailed,
+
+    // Batch publish persistence errors
+    BatchStateSerializeFailed,
+    BatchStateTooLarge,
+    BatchStateDirFailed,
+    BatchStateWriteFailed,
+    BatchStateReadFailed,
+    BatchStateNotFound,
+    BatchStateDeleteFailed,
 }
 
 impl DesktopCommandError {
@@ -168,6 +180,13 @@ impl DesktopCommandError {
             Self::PublicArticleVerifyTimeout => "PUBLIC_ARTICLE_VERIFY_TIMEOUT",
             Self::PublishAlreadyPushed => "PUBLISH_ALREADY_PUSHED",
             Self::PublishResetFailed => "PUBLISH_RESET_FAILED",
+            Self::BatchStateSerializeFailed => "BATCH_STATE_SERIALIZE_FAILED",
+            Self::BatchStateTooLarge => "BATCH_STATE_TOO_LARGE",
+            Self::BatchStateDirFailed => "BATCH_STATE_DIR_FAILED",
+            Self::BatchStateWriteFailed => "BATCH_STATE_WRITE_FAILED",
+            Self::BatchStateReadFailed => "BATCH_STATE_READ_FAILED",
+            Self::BatchStateNotFound => "BATCH_STATE_NOT_FOUND",
+            Self::BatchStateDeleteFailed => "BATCH_STATE_DELETE_FAILED",
         }
     }
 
@@ -241,6 +260,13 @@ impl DesktopCommandError {
             Self::PublicArticleVerifyTimeout => "公开文章验证超时，请稍后重新检查。",
             Self::PublishAlreadyPushed => "该发布 Commit 已推送，请勿重复推送。",
             Self::PublishResetFailed => "重置发布流程失败，请重新检查。",
+            Self::BatchStateSerializeFailed => "批量发布状态序列化失败。",
+            Self::BatchStateTooLarge => "批量发布状态超过大小限制，请先清理队列。",
+            Self::BatchStateDirFailed => "无法定位或创建批量状态目录。",
+            Self::BatchStateWriteFailed => "写入批量状态失败，请重试。",
+            Self::BatchStateReadFailed => "读取批量状态失败，请重试。",
+            Self::BatchStateNotFound => "找不到指定的批量发布批次。",
+            Self::BatchStateDeleteFailed => "删除批量状态失败，请重试。",
         }
     }
 
@@ -298,6 +324,26 @@ pub struct SelectedMarkdownFileDto {
     modified_at: Option<String>,
     content: String,
     source_fingerprint: String,
+}
+
+/// Lightweight selection metadata for batch import.
+/// Content is intentionally NOT read during multi-selection; each item is
+/// parsed on demand via `read_markdown_path`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedMarkdownFileMetaDto {
+    absolute_path: String,
+    display_name: String,
+    directory_path: String,
+    size: u64,
+    modified_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadMarkdownPathRequest {
+    path: String,
+    max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -481,6 +527,122 @@ fn select_markdown_file(
             .unwrap_or(MAX_MARKDOWN_SIZE),
     )
     .map_err(Into::into)
+}
+
+/// Batch multi-select: pick up to 10 Markdown files and return their metadata.
+///
+/// Does NOT read file content — each batch item is parsed on demand via
+/// `read_markdown_path`. User cancellation returns an empty array, not an error.
+#[tauri::command]
+fn select_markdown_files() -> CommandResult<Vec<SelectedMarkdownFileMetaDto>> {
+    let paths = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_files()
+        .unwrap_or_default();
+    Ok(normalize_selected_paths(paths))
+}
+
+/// Read a single Markdown file by path (batch parse / re-parse / restore).
+#[tauri::command]
+fn read_markdown_path(request: ReadMarkdownPathRequest) -> CommandResult<SelectedMarkdownFileDto> {
+    let path = PathBuf::from(&request.path);
+    if !path.is_absolute() {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
+    read_markdown_file(&path, request.max_bytes.unwrap_or(MAX_MARKDOWN_SIZE)).map_err(Into::into)
+}
+
+/// Persist batch publish state to the local app data directory.
+///
+/// The frontend MUST strip Markdown content, tokens and binaries before calling
+/// this — the backend stores JSON metadata only and enforces a size limit.
+#[tauri::command]
+fn save_batch_publish_state(
+    app: tauri::AppHandle,
+    batch_id: String,
+    payload: serde_json::Value,
+) -> CommandResult<()> {
+    if !is_safe_workspace_id(&batch_id) {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
+    let serialized = serde_json::to_vec(&payload)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateSerializeFailed))?;
+    if serialized.len() > MAX_BATCH_STATE_BYTES {
+        return Err(CommandErrorDto::from(
+            DesktopCommandError::BatchStateTooLarge,
+        ));
+    }
+    let batches = batch_states_dir(&app)?;
+    fs::write(batches.join(format!("{batch_id}.json")), serialized)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateWriteFailed))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_batch_publish_state(
+    app: tauri::AppHandle,
+    batch_id: String,
+) -> CommandResult<Option<serde_json::Value>> {
+    if !is_safe_workspace_id(&batch_id) {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
+    let batches = batch_states_dir(&app)?;
+    let file = batches.join(format!("{batch_id}.json"));
+    if !file.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&file)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateReadFailed))?;
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateReadFailed))?;
+    Ok(Some(value))
+}
+
+#[tauri::command]
+fn list_batch_publish_states(app: tauri::AppHandle) -> CommandResult<Vec<serde_json::Value>> {
+    let batches = batch_states_dir(&app)?;
+    let mut states = Vec::new();
+    let entries = fs::read_dir(&batches)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateReadFailed))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        if let Ok(bytes) = fs::read(&path) {
+            if let Ok(value) = serde_json::from_slice(&bytes) {
+                states.push(value);
+            }
+        }
+    }
+    Ok(states)
+}
+
+#[tauri::command]
+fn delete_batch_publish_state(app: tauri::AppHandle, batch_id: String) -> CommandResult<()> {
+    if !is_safe_workspace_id(&batch_id) {
+        return Err(CommandErrorDto::from(DesktopCommandError::UnsafePath));
+    }
+    let batches = batch_states_dir(&app)?;
+    let file = batches.join(format!("{batch_id}.json"));
+    match fs::remove_file(&file) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(CommandErrorDto::from(
+            DesktopCommandError::BatchStateDeleteFailed,
+        )),
+    }
+}
+
+fn batch_states_dir(app: &tauri::AppHandle) -> Result<PathBuf, CommandErrorDto> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateDirFailed))?;
+    let dir = data_dir.join("batch-publish");
+    fs::create_dir_all(&dir)
+        .map_err(|_| CommandErrorDto::from(DesktopCommandError::BatchStateDirFailed))?;
+    Ok(dir)
 }
 
 #[tauri::command]
@@ -813,6 +975,12 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             select_markdown_file,
+            select_markdown_files,
+            read_markdown_path,
+            save_batch_publish_state,
+            load_batch_publish_state,
+            list_batch_publish_states,
+            delete_batch_publish_state,
             resolve_image_dependencies,
             generate_publish_workspace,
             discard_publish_workspace,
@@ -932,6 +1100,57 @@ fn read_markdown_file(
         content,
         source_fingerprint: sha256_hex(&bytes),
     })
+}
+
+/// Normalize raw multi-select paths into batch metadata:
+/// - keeps only `.md` / `.markdown` regular files;
+/// - deduplicates by canonical absolute path (first occurrence wins);
+/// - preserves the user's selection order;
+/// - caps the result at `MAX_BATCH_SELECTION` items;
+/// - never reads file content.
+fn normalize_selected_paths(paths: Vec<PathBuf>) -> Vec<SelectedMarkdownFileMetaDto> {
+    let mut seen = HashSet::new();
+    let mut results = Vec::new();
+    for path in paths {
+        if results.len() >= MAX_BATCH_SELECTION {
+            break;
+        }
+        let extension = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if extension != "md" && extension != "markdown" {
+            continue;
+        }
+        let absolute = match path.canonicalize() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let absolute_key = display_path(&absolute);
+        if !seen.insert(absolute_key.clone()) {
+            continue;
+        }
+        let metadata = match fs::metadata(&absolute) {
+            Ok(value) if value.is_file() => value,
+            _ => continue,
+        };
+        results.push(SelectedMarkdownFileMetaDto {
+            absolute_path: absolute_key,
+            display_name: absolute
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or("note.md")
+                .to_string(),
+            directory_path: display_path(absolute.parent().unwrap_or_else(|| Path::new(""))),
+            size: metadata.len(),
+            modified_at: metadata
+                .modified()
+                .ok()
+                .map(|time| chrono::DateTime::<Utc>::from(time).to_rfc3339()),
+        });
+    }
+    results
 }
 
 fn resolve_dependencies(
@@ -1859,6 +2078,66 @@ mod tests {
         }
     }
 
+    /// Like `workspace_request`, but with a distinct article slug so two notes
+    /// target different content paths (used by the batch integration tests).
+    fn workspace_request_with_slug(
+        repo: &Path,
+        source: &Path,
+        content: &str,
+        slug: &str,
+    ) -> GeneratePublishWorkspaceRequest {
+        GeneratePublishWorkspaceRequest {
+            repository_root: display_path(repo),
+            source_markdown_path: display_path(source),
+            source_fingerprint: sha256_hex(content.as_bytes()),
+            markdown_content: content.to_string(),
+            article: ArticleInfoDto {
+                title: slug.to_string(),
+                description: "".to_string(),
+                slug: slug.to_string(),
+                tags: vec![],
+                date: "2026-07-30".to_string(),
+                updated: "2026-07-30".to_string(),
+                draft: false,
+                featured: false,
+            },
+            archive_profile: ArchiveProfileDto {
+                id: "uncategorized".to_string(),
+                name: "Other".to_string(),
+                category: "Other".to_string(),
+                topic: Some("Uncategorized".to_string()),
+                directory: "content/other/uncategorized".to_string(),
+                default_tags: vec![],
+                description: None,
+            },
+            image_references: vec![],
+            dependencies: vec![],
+            pending_archive_profiles: vec![],
+        }
+    }
+
+    fn git_output(dir: &Path, args: &[&str]) -> String {
+        let out = crate::services::process_util::silent_command("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn init_bare_remote(remote: &Path, working: &Path) {
+        crate::services::process_util::silent_command("git")
+            .args(["init", "--bare"])
+            .current_dir(remote)
+            .output()
+            .unwrap();
+        crate::services::process_util::silent_command("git")
+            .args(["remote", "add", "origin", remote.to_str().unwrap()])
+            .current_dir(working)
+            .output()
+            .unwrap();
+    }
+
     #[test]
     fn reads_markdown_file() {
         let dir = tempdir().unwrap();
@@ -1867,6 +2146,83 @@ mod tests {
         let result = read_markdown_file(&file, MAX_MARKDOWN_SIZE).unwrap();
         assert_eq!(result.file_name, "note.md");
         assert_eq!(result.content, "# Title");
+    }
+
+    #[test]
+    fn normalizes_empty_selection_to_empty() {
+        assert!(normalize_selected_paths(vec![]).is_empty());
+    }
+
+    #[test]
+    fn normalizes_cancel_to_empty() {
+        // `select_markdown_files` maps dialog cancel to an empty Vec already;
+        // this guards the pure normalization path too.
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "# Title").unwrap();
+        let result = normalize_selected_paths(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn normalizes_keeps_order_and_deduplicates() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.md");
+        let b = dir.path().join("b.markdown");
+        fs::write(&a, "# A").unwrap();
+        fs::write(&b, "# B").unwrap();
+        let result = normalize_selected_paths(vec![a.clone(), b.clone(), a.clone()]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].display_name, "a.md");
+        assert_eq!(result[1].display_name, "b.markdown");
+    }
+
+    #[test]
+    fn normalizes_filters_extension_and_directories() {
+        let dir = tempdir().unwrap();
+        let md = dir.path().join("keep.md");
+        let txt = dir.path().join("skip.txt");
+        fs::write(&md, "# Keep").unwrap();
+        fs::write(&txt, "skip").unwrap();
+        let result =
+            normalize_selected_paths(vec![txt.clone(), dir.path().to_path_buf(), md.clone()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].display_name, "keep.md");
+    }
+
+    #[test]
+    fn normalizes_caps_at_ten() {
+        let dir = tempdir().unwrap();
+        let mut paths = Vec::new();
+        for index in 0..12 {
+            let file = dir.path().join(format!("note-{index}.md"));
+            fs::write(&file, format!("# Note {index}")).unwrap();
+            paths.push(file);
+        }
+        let result = normalize_selected_paths(paths);
+        assert_eq!(result.len(), MAX_BATCH_SELECTION);
+    }
+
+    #[test]
+    fn normalizes_skips_missing_files() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.md");
+        let real = dir.path().join("real.md");
+        fs::write(&real, "# Real").unwrap();
+        let result = normalize_selected_paths(vec![missing, real]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].display_name, "real.md");
+    }
+
+    #[test]
+    fn normalizes_meta_has_no_content() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        fs::write(&file, "# Title").unwrap();
+        let result = normalize_selected_paths(vec![file]);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].size > 0);
+        assert!(result[0].absolute_path.contains("note.md"));
     }
 
     #[test]
@@ -1988,5 +2344,198 @@ mod tests {
         assert!(Path::new(&result.target_markdown_path).starts_with(target.path()));
         assert!(!source.path().join(".publish-workspaces").exists());
         fs::remove_dir_all(result.workspace_path).unwrap();
+    }
+
+    /// Drives one full sequential note publish: workspace → write → stage → commit.
+    fn publish_one_note(
+        repo: &Path,
+        source: &Path,
+        content: &str,
+        slug: &str,
+        message: &str,
+    ) -> String {
+        let gen =
+            generate_workspace(workspace_request_with_slug(repo, source, content, slug)).unwrap();
+        let apply =
+            crate::services::repository_publish::apply_publish_workspace(ApplyWorkspaceRequest {
+                repository_root: display_path(repo),
+                workspace_id: gen.workspace_id.clone(),
+                operation: "create".to_string(),
+                archive_profile_changes: vec![],
+            })
+            .unwrap();
+        let stage =
+            crate::services::repository_publish::stage_transaction(StageTransactionRequest {
+                repository_root: display_path(repo),
+                transaction_id: apply.transaction_id.clone(),
+            })
+            .unwrap();
+        assert!(stage.can_commit);
+        let commit =
+            crate::services::repository_publish::commit_transaction(CommitTransactionRequest {
+                repository_root: display_path(repo),
+                transaction_id: apply.transaction_id,
+                message: message.to_string(),
+            })
+            .unwrap();
+        commit.commit_hash
+    }
+
+    #[test]
+    fn batch_two_notes_two_commits_one_push_to_bare_remote() {
+        let target = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        let sources = tempdir().unwrap();
+        init_target_repo(target.path());
+        init_bare_remote(remote.path(), target.path());
+
+        let note_a = sources.path().join("note-a.md");
+        let note_b = sources.path().join("note-b.md");
+        fs::write(&note_a, "# Note A").unwrap();
+        fs::write(&note_b, "# Note B").unwrap();
+
+        // Untracked private file must never enter a commit or the remote.
+        fs::write(target.path().join("untracked-private.md"), "# Private").unwrap();
+
+        // Two independent, sequential commits.
+        let commit_a = publish_one_note(
+            target.path(),
+            &note_a,
+            "# Note A",
+            "note-a",
+            "docs(note): add note-a",
+        );
+        let commit_b = publish_one_note(
+            target.path(),
+            &note_b,
+            "# Note B",
+            "note-b",
+            "docs(note): add note-b",
+        );
+        assert_ne!(
+            commit_a, commit_b,
+            "batch items must produce distinct commits"
+        );
+
+        // Lock is released after each commit.
+        assert!(!target.path().join(".publish.lock").exists());
+
+        // Single push of the final HEAD.
+        crate::services::git_remote::push_publish(target.path(), "origin", "master", &commit_b)
+            .unwrap();
+        assert!(crate::services::git_remote::verify_remote_commit(
+            target.path(),
+            "origin",
+            "master",
+            &commit_b
+        )
+        .unwrap());
+
+        // Remote master points at the last commit and contains both commits.
+        let remote_head = git_output(target.path(), &["rev-parse", "origin/master"]);
+        assert_eq!(remote_head, commit_b);
+        let remote_log = git_output(target.path(), &["log", "--oneline", "origin/master"]);
+        assert!(
+            remote_log.contains(&commit_a[..7]),
+            "first commit missing from remote history"
+        );
+        assert!(
+            remote_log.contains(&commit_b[..7]),
+            "second commit missing from remote history"
+        );
+
+        // Untracked private file is absent from local HEAD tree and remote tree.
+        let local_tree = git_output(target.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!local_tree.contains("untracked-private.md"));
+        let remote_tree = git_output(
+            target.path(),
+            &["ls-tree", "-r", "--name-only", "origin/master"],
+        );
+        assert!(!remote_tree.contains("untracked-private.md"));
+    }
+
+    #[test]
+    fn batch_second_item_failure_pauses_then_repairs_and_pushes_once() {
+        let target = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        let sources = tempdir().unwrap();
+        init_target_repo(target.path());
+        init_bare_remote(remote.path(), target.path());
+
+        let note_a = sources.path().join("note-a.md");
+        let note_b = sources.path().join("note-b.md");
+        fs::write(&note_a, "# Note A").unwrap();
+        fs::write(&note_b, "# Note B").unwrap();
+
+        // Item 1 succeeds.
+        let commit_a = publish_one_note(
+            target.path(),
+            &note_a,
+            "# Note A",
+            "note-a",
+            "docs(note): add note-a",
+        );
+
+        // Item 2 fails at the write stage: its source markdown vanishes after the
+        // workspace is generated, so apply_publish_workspace rejects with
+        // "源 Markdown 文件不存在" (source path existence check).
+        let gen_b = generate_workspace(workspace_request_with_slug(
+            target.path(),
+            &note_b,
+            "# Note B",
+            "note-b",
+        ))
+        .unwrap();
+        fs::remove_file(&note_b).unwrap();
+        let failed_apply =
+            crate::services::repository_publish::apply_publish_workspace(ApplyWorkspaceRequest {
+                repository_root: display_path(target.path()),
+                workspace_id: gen_b.workspace_id.clone(),
+                operation: "create".to_string(),
+                archive_profile_changes: vec![],
+            });
+        assert!(
+            failed_apply.is_err(),
+            "item 2 write must fail when source is missing"
+        );
+        // Nothing was pushed (partial batches are never auto-pushed).
+        // First commit is intact.
+        let head = git_output(target.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(head, commit_a);
+        assert!(git_output(target.path(), &["log", "--oneline", "HEAD"]).contains(&commit_a[..7]));
+
+        // Repair item 2: restore the source, regenerate, complete, then push once.
+        fs::write(&note_b, "# Note B").unwrap();
+        let commit_b = publish_one_note(
+            target.path(),
+            &note_b,
+            "# Note B",
+            "note-b",
+            "docs(note): add note-b",
+        );
+        assert_ne!(commit_a, commit_b);
+        assert!(!target.path().join(".publish.lock").exists());
+
+        crate::services::git_remote::push_publish(target.path(), "origin", "master", &commit_b)
+            .unwrap();
+        assert!(crate::services::git_remote::verify_remote_commit(
+            target.path(),
+            "origin",
+            "master",
+            &commit_b
+        )
+        .unwrap());
+        assert_eq!(
+            git_output(target.path(), &["rev-parse", "origin/master"]),
+            commit_b
+        );
+        let remote_log = git_output(target.path(), &["log", "--oneline", "origin/master"]);
+        assert!(remote_log.contains(&commit_a[..7]));
+        assert!(remote_log.contains(&commit_b[..7]));
+        assert!(!git_output(
+            target.path(),
+            &["ls-tree", "-r", "--name-only", "origin/master"]
+        )
+        .contains("untracked-private.md"));
     }
 }

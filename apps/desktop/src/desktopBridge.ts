@@ -1,6 +1,7 @@
 import type { ArchiveProfile, ArticleInfo } from "@davinci-journey/classification";
 import type { MarkdownImageReference } from "@davinci-journey/markdown-core";
 import type { ImageCandidate, ResolvedImageDependency, SelectedMarkdownFile } from "./publishState";
+import type { BatchPublishPersistedState } from "./batchPublishTypes";
 
 export type DesktopCommandErrorCode =
   | "FILE_SELECTION_CANCELLED"
@@ -64,7 +65,17 @@ export type DesktopCommandErrorCode =
   | "PUBLIC_ARTICLE_NOT_FOUND"
   | "PUBLIC_ARTICLE_VERIFY_TIMEOUT"
   | "PUBLISH_ALREADY_PUSHED"
-  | "PUBLISH_RESET_FAILED";
+  | "PUBLISH_RESET_FAILED"
+  | "BATCH_NOT_READY"
+  | "BATCH_EXECUTION_FAILED"
+  | "BATCH_IMPORT_FAILED"
+  | "BATCH_STATE_SERIALIZE_FAILED"
+  | "BATCH_STATE_TOO_LARGE"
+  | "BATCH_STATE_DIR_FAILED"
+  | "BATCH_STATE_WRITE_FAILED"
+  | "BATCH_STATE_READ_FAILED"
+  | "BATCH_STATE_NOT_FOUND"
+  | "BATCH_STATE_DELETE_FAILED";
 
 export interface DesktopCommandError {
   code: DesktopCommandErrorCode;
@@ -81,6 +92,23 @@ export interface SelectMarkdownFileRequest {
 export type SelectedMarkdownFileDto = SelectedMarkdownFile & {
   sourceFingerprint: string;
 };
+
+/**
+ * Lightweight metadata returned by batch multi-selection.
+ * Content is NOT read during selection; parse each item via `readMarkdownPath`.
+ */
+export interface SelectedMarkdownFileMetaDto {
+  absolutePath: string;
+  displayName: string;
+  directoryPath: string;
+  size: number;
+  modifiedAt?: string;
+}
+
+export interface ReadMarkdownPathRequest {
+  path: string;
+  maxBytes?: number;
+}
 
 export type ImageCandidateDto = ImageCandidate;
 
@@ -395,6 +423,12 @@ export interface ResetPublishFlowRequest {
 export interface DesktopBridge {
   mode: "tauri" | "browser";
   selectMarkdownFile(request?: SelectMarkdownFileRequest): Promise<SelectedMarkdownFileDto>;
+  selectMarkdownFiles(): Promise<SelectedMarkdownFileMetaDto[]>;
+  readMarkdownPath(request: ReadMarkdownPathRequest): Promise<SelectedMarkdownFileDto>;
+  saveBatchPublishState(batchId: string, payload: BatchPublishPersistedState): Promise<void>;
+  loadBatchPublishState(batchId: string): Promise<BatchPublishPersistedState | undefined>;
+  listBatchPublishStates(): Promise<BatchPublishPersistedState[]>;
+  deleteBatchPublishState(batchId: string): Promise<void>;
   resolveImageDependencies(request: ResolveImageDependenciesRequest): Promise<ResolvedImageDependencyDto[]>;
   generatePublishWorkspace(request: GeneratePublishWorkspaceRequest): Promise<GeneratePublishWorkspaceResult>;
   discardPublishWorkspace(workspaceId: string, repositoryRoot?: string): Promise<void>;
@@ -485,7 +519,17 @@ const errorMessages: Record<DesktopCommandErrorCode, string> = {
   PUBLIC_ARTICLE_NOT_FOUND: "公开文章页面暂时无法确认，可能仍在部署。",
   PUBLIC_ARTICLE_VERIFY_TIMEOUT: "公开文章验证超时，请稍后重新检查。",
   PUBLISH_ALREADY_PUSHED: "该发布 Commit 已推送，请勿重复推送。",
-  PUBLISH_RESET_FAILED: "重置发布流程失败，请重新检查。"
+  PUBLISH_RESET_FAILED: "重置发布流程失败，请重新检查。",
+  BATCH_NOT_READY: "队列尚未全部就绪，不能开始批量发布。",
+  BATCH_EXECUTION_FAILED: "批量发布执行失败。",
+  BATCH_IMPORT_FAILED: "批量导入 Markdown 失败。",
+  BATCH_STATE_SERIALIZE_FAILED: "批量发布状态序列化失败。",
+  BATCH_STATE_TOO_LARGE: "批量发布状态超过大小限制，请先清理队列。",
+  BATCH_STATE_DIR_FAILED: "无法定位或创建批量状态目录。",
+  BATCH_STATE_WRITE_FAILED: "写入批量状态失败，请重试。",
+  BATCH_STATE_READ_FAILED: "读取批量状态失败，请重试。",
+  BATCH_STATE_NOT_FOUND: "找不到指定的批量发布批次。",
+  BATCH_STATE_DELETE_FAILED: "删除批量状态失败，请重试。"
 };
 
 export function desktopErrorMessage(error: unknown): string {
@@ -558,6 +602,16 @@ async function selectedFileFromBrowser(file: File): Promise<SelectedMarkdownFile
   };
 }
 
+function selectedMetaFromBrowser(file: File): SelectedMarkdownFileMetaDto {
+  return {
+    absolutePath: `browser://${file.name}`,
+    displayName: file.name,
+    directoryPath: "浏览器预览模式",
+    size: file.size,
+    modifiedAt: file.lastModified ? new Date(file.lastModified).toISOString() : undefined
+  };
+}
+
 function browserDependency(reference: MarkdownImageReference): ResolvedImageDependencyDto {
   if (reference.pathKind === "remote") {
     return {
@@ -586,13 +640,52 @@ function browserDependency(reference: MarkdownImageReference): ResolvedImageDepe
   };
 }
 
-export function createBrowserBridge(filePicker: () => Promise<File | undefined>): DesktopBridge {
+export function createBrowserBridge(
+  filePicker: () => Promise<File | undefined>,
+  multiFilePicker?: () => Promise<File[]>
+): DesktopBridge {
   return {
     mode: "browser",
     async selectMarkdownFile() {
       const file = await filePicker();
       if (!file) throw commandError("FILE_SELECTION_CANCELLED");
       return selectedFileFromBrowser(file);
+    },
+    async selectMarkdownFiles() {
+      const files = multiFilePicker ? await multiFilePicker() : [];
+      const extensionOk = (name: string) => {
+        const ext = name.toLowerCase().split(".").pop();
+        return ext === "md" || ext === "markdown";
+      };
+      return files.filter((file) => extensionOk(file.name)).map(selectedMetaFromBrowser);
+    },
+    async readMarkdownPath() {
+      throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不能按路径读取 Markdown，请在 Tauri 桌面模式下继续批量发布。");
+    },
+    async saveBatchPublishState(batchId, payload) {
+      localStorage.setItem(`batch-publish:${batchId}`, JSON.stringify(payload));
+    },
+    async loadBatchPublishState(batchId) {
+      const raw = localStorage.getItem(`batch-publish:${batchId}`);
+      return raw ? (JSON.parse(raw) as BatchPublishPersistedState) : undefined;
+    },
+    async listBatchPublishStates() {
+      const result: BatchPublishPersistedState[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (!key?.startsWith("batch-publish:")) continue;
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        try {
+          result.push(JSON.parse(raw) as BatchPublishPersistedState);
+        } catch {
+          // Skip corrupt entries.
+        }
+      }
+      return result;
+    },
+    async deleteBatchPublishState(batchId) {
+      localStorage.removeItem(`batch-publish:${batchId}`);
     },
     async resolveImageDependencies(request) {
       return request.references.map(browserDependency);
@@ -677,6 +770,12 @@ export function createTauriBridge(): DesktopBridge {
   return {
     mode: "tauri",
     selectMarkdownFile: (request) => invokeTauri("select_markdown_file", { request }),
+    selectMarkdownFiles: () => invokeTauri("select_markdown_files"),
+    readMarkdownPath: (request) => invokeTauri("read_markdown_path", { request }),
+    saveBatchPublishState: (batchId, payload) => invokeTauri("save_batch_publish_state", { batchId, payload }),
+    loadBatchPublishState: (batchId) => invokeTauri("load_batch_publish_state", { batchId }),
+    listBatchPublishStates: () => invokeTauri("list_batch_publish_states"),
+    deleteBatchPublishState: (batchId) => invokeTauri("delete_batch_publish_state", { batchId }),
     resolveImageDependencies: (request) => invokeTauri("resolve_image_dependencies", { request }),
     generatePublishWorkspace: (request) => invokeTauri("generate_publish_workspace", { request }),
     discardPublishWorkspace: (workspaceId, repositoryRoot) => invokeTauri("discard_publish_workspace", { workspaceId, repositoryRoot }),
@@ -703,6 +802,9 @@ export function createTauriBridge(): DesktopBridge {
   };
 }
 
-export function createDesktopBridge(filePicker: () => Promise<File | undefined>): DesktopBridge {
-  return hasTauriRuntime() ? createTauriBridge() : createBrowserBridge(filePicker);
+export function createDesktopBridge(
+  filePicker: () => Promise<File | undefined>,
+  multiFilePicker?: () => Promise<File[]>
+): DesktopBridge {
+  return hasTauriRuntime() ? createTauriBridge() : createBrowserBridge(filePicker, multiFilePicker);
 }

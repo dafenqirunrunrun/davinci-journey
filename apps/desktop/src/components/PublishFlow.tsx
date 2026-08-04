@@ -15,6 +15,7 @@ import { initialArchiveProfiles } from "../archiveProfiles";
 import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DeploymentCheckResult, type DesktopBridge, type InspectRemotePublishResult, type PrePublishCheckResult, type PublishLockStatus, type PushPublishResult, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type RemotePublishState, type RemotePublishStatus, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
 import { getPublishWriteEligibility, publishWriteBlockReasonText } from "../publishWriteEligibility";
+import { BatchPublishFlow } from "./BatchPublishFlow";
 
 const steps = ["选择 Markdown", "检查图片", "编辑文章信息", "选择归档方案", "预览工作区", "写入并提交", "推送与上线"];
 // 使用本地当前日期（YYYY-MM-DD），而不是写死某个日期。
@@ -45,7 +46,7 @@ function makeSlug(value: string, fallback: string): string {
   return slugify(value.replace(/\.[^.]+$/, "")) || slugify(fallback) || "untitled-note";
 }
 
-async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto, profiles: ArchiveProfile[], bridge: DesktopBridge): Promise<PublishDraft> {
+export async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto, profiles: ArchiveProfile[], bridge: DesktopBridge): Promise<PublishDraft> {
   const parsedDocument = parseMarkdown({ fileName: markdownFile.fileName, content: markdownFile.content });
   const recommendation = recommendArchiveProfile(
     {
@@ -98,7 +99,7 @@ async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto, profil
   };
 }
 
-function updatePreview(draft: PublishDraft, profiles: ArchiveProfile[]): PublishDraft {
+export function updatePreview(draft: PublishDraft, profiles: ArchiveProfile[]): PublishDraft {
   const profile = profiles.find((item) => item.id === draft.archive.selectedProfileId) ?? profiles[0];
   if (!profile || !draft.article.slug) return draft;
   const preview = getArchivePathPreview(profile, draft.article.slug);
@@ -134,6 +135,7 @@ export function PublishFlow() {
   const [commitMessage, setCommitMessage] = useState("");
   const [repositoryTarget, setRepositoryTarget] = useState<RepositoryRootResult | undefined>();
   const [publishLock, setPublishLock] = useState<PublishLockStatus | undefined>();
+  const [batchOpen, setBatchOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingFilePicker = useRef<((file?: File) => void) | undefined>();
 
@@ -793,7 +795,10 @@ export function PublishFlow() {
         ))}
       </nav>
 
-      {step === 1 && (
+      {step === 1 &&
+        (batchOpen ? (
+          <BatchPublishFlow profiles={profiles} repositoryRoot={repoRoot} onClose={() => setBatchOpen(false)} />
+        ) : (
         <div className="panel upload-panel" onDragOver={(event) => event.preventDefault()}>
           <p className="eyebrow">第 1 步</p>
           <h2>选择 Markdown</h2>
@@ -810,13 +815,18 @@ export function PublishFlow() {
             onCleanupStaleLock={() => void cleanupStaleLock()}
           />
           <input ref={inputRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown" onChange={(event) => void handleBrowserInput(event.target.files?.[0])} />
-          <button className="primary-button" type="button" onClick={() => void selectMarkdown()}>
-            选择 Markdown 文件
-          </button>
+          <div className="actions">
+            <button className="primary-button" type="button" onClick={() => void selectMarkdown()}>
+              选择 Markdown 文件
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setBatchOpen(true)}>
+              批量选择 Markdown
+            </button>
+          </div>
           {draft.source.markdownFile && <FileSummary file={draft.source.markdownFile} parsedTitle={draft.source.parsedDocument?.title} imageCount={draft.source.parsedDocument?.imageReferences.length ?? 0} />}
           {draft.error && <p className="error-message">{draft.error}</p>}
         </div>
-      )}
+        ))}
 
       {step === 2 && (
         <div className="panel">
