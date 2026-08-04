@@ -2,6 +2,7 @@
 archiveProfile: "ai-agent-sft"
 category: "AI Agent"
 date: "2026-08-04"
+publishedAt: "2026-08-04T13:06:45+08:00"
 description: ""
 draft: false
 featured: false

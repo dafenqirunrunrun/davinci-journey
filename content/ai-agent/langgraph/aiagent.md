@@ -2,6 +2,7 @@
 archiveProfile: "ai-agent-langgraph"
 category: "AI Agent"
 date: "2026-08-04"
+publishedAt: "2026-08-04T18:15:01+08:00"
 description: ""
 draft: false
 featured: false

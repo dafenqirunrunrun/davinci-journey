@@ -3,15 +3,20 @@ import { SITE_DESCRIPTION, SITE_NAME, absoluteUrl } from "../lib/site";
 
 export function GET() {
   const items = getNotes()
-    .map(
-      (note) => `<item>
+    .map((note) => {
+      const publish = note.publishedAt
+        ? new Date(note.publishedAt * 1000).toUTCString()
+        : note.updated || note.date
+          ? new Date(note.updated || note.date || "").toUTCString()
+          : "";
+      return `<item>
         <title><![CDATA[${note.title}]]></title>
         <description><![CDATA[${note.description}]]></description>
         <link>${absoluteUrl(note.urlPath)}</link>
         <guid>${absoluteUrl(note.urlPath)}</guid>
-        ${note.updated || note.date ? `<pubDate>${new Date(note.updated || note.date || "").toUTCString()}</pubDate>` : ""}
-      </item>`
-    )
+        ${publish ? `<pubDate>${publish}</pubDate>` : ""}
+      </item>`;
+    })
     .join("");
 
   return new Response(

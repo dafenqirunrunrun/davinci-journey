@@ -25,6 +25,8 @@ export interface NoteFrontMatter {
   slug?: string;
   date?: string;
   updated?: string;
+  /** Author-declared first-publish timestamp; overrides `date` and git history. */
+  publishedAt?: string;
   draft?: boolean;
   featured?: boolean;
 }
@@ -42,8 +44,14 @@ export interface NoteEntry {
   sourcePath: string;
   urlPath: string;
   body: string;
-  /** Unix seconds of the file's last git commit — the "recently published" signal. */
+  /**
+   * Stable first-publish time in unix seconds. Resolved from front matter
+   * `publishedAt` → front matter `date` → first git commit → file mtime.
+   * Editing body, renaming a file or fixing a slug must NOT change this.
+   */
   publishedAt?: number;
+  /** Last git commit touching the file, in unix seconds ("recently updated"). */
+  gitUpdatedAt?: number;
 }
 
 export interface ArchiveProfile {
@@ -288,16 +296,9 @@ export function getArchiveProfiles(): ArchiveProfile[] {
   }));
 }
 
-/**
- * Unix seconds of the last git commit touching a content file. This is the
- * authoritative "recently published" signal: two notes may share the same
- * Front Matter `date`/`updated`, but the git history records which was actually
- * published last. Returns `undefined` when git is unavailable (e.g. a tarball
- * build), in which case sorting falls back to `updated`/`date`.
- */
-function gitCommitTimestamp(relPath: string): number | undefined {
+function gitLogUnixSeconds(args: string[]): number | undefined {
   try {
-    const out = execFileSync("git", ["log", "-1", "--format=%ct", "--", relPath], {
+    const out = execFileSync("git", args, {
       cwd: rootDir,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
@@ -307,6 +308,60 @@ function gitCommitTimestamp(relPath: string): number | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Unix seconds of the last git commit touching the file. */
+function gitLastCommitTime(relPath: string): number | undefined {
+  return gitLogUnixSeconds(["log", "-1", "--format=%ct", "--", relPath]);
+}
+
+/**
+ * Unix seconds of the FIRST git commit that introduced the file, following
+ * renames (`--follow`) so renaming a file does not reset its publish time.
+ */
+function gitFirstCommitTime(relPath: string): number | undefined {
+  const out = gitLogUnixSeconds(["log", "--follow", "--diff-filter=A", "--format=%ct", "--", relPath]);
+  if (out !== undefined) return out;
+  // Fall back to the oldest commit touching the path.
+  return gitLogUnixSeconds(["log", "--reverse", "--format=%ct", "--", relPath]);
+}
+
+function parseDateToSeconds(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? Math.floor(time / 1000) : undefined;
+}
+
+/**
+ * Resolve the stable publish time (unix seconds):
+ * front matter `publishedAt` → front matter `date` → first git commit → mtime.
+ * Exposed for testing.
+ */
+export function resolvePublishedAt(input: {
+  publishedAt?: string;
+  date?: string;
+  gitFirstCommit?: number;
+  mtime?: number;
+}): number | undefined {
+  return (
+    parseDateToSeconds(input.publishedAt) ??
+    parseDateToSeconds(input.date) ??
+    input.gitFirstCommit ??
+    input.mtime
+  );
+}
+
+/**
+ * Resolve the "recently updated" time (unix seconds):
+ * last git commit → front matter `updated` → publishedAt.
+ * Exposed for testing.
+ */
+export function resolveGitUpdatedAt(input: {
+  gitLastCommit?: number;
+  updated?: string;
+  publishedAt?: number;
+}): number | undefined {
+  return input.gitLastCommit ?? parseDateToSeconds(input.updated) ?? input.publishedAt;
 }
 
 /** Normalize a slug for uniqueness comparison: trim, URL-decode, lowercase. */
@@ -360,6 +415,20 @@ export function getNotes(): NoteEntry[] {
       const title = frontMatter.title || extractTitle(body, slug);
       const sourcePath = relative(rootDir, path).split(sep).join("/");
       const category = frontMatter.category || dirname(relative(contentDir, path)).split(sep)[0] || "Other";
+      const gitFirstCommit = gitFirstCommitTime(sourcePath);
+      const gitLastCommit = gitLastCommitTime(sourcePath);
+      const mtime = Math.floor(statSync(path).mtimeMs / 1000);
+      const publishedAt = resolvePublishedAt({
+        publishedAt: frontMatter.publishedAt,
+        date: frontMatter.date,
+        gitFirstCommit,
+        mtime
+      });
+      const gitUpdatedAt = resolveGitUpdatedAt({
+        gitLastCommit,
+        updated: frontMatter.updated,
+        publishedAt
+      });
       return {
         slug,
         title,
@@ -373,7 +442,8 @@ export function getNotes(): NoteEntry[] {
         sourcePath,
         urlPath: `/notes/${slug}/`,
         body,
-        publishedAt: gitCommitTimestamp(sourcePath)
+        publishedAt,
+        gitUpdatedAt
       };
     })
     .filter((note) => note.slug && !note.sourcePath.includes("fixtures/"));
@@ -381,30 +451,47 @@ export function getNotes(): NoteEntry[] {
   return notes.sort(sortNotesDescending);
 }
 
-/**
- * Sort notes newest-first. Primary key is `publishedAt` (the last git commit
- * time — the true publication order); when unavailable, fall back to
- * `updated`, then `date`. Exposed for testing the homepage's "最新笔记" ordering.
- */
-export function sortNotesDescending<T extends { updated?: string; date?: string; publishedAt?: number }>(a: T, b: T): number {
-  // publishedAt is unix seconds; dateToTimestamp returns milliseconds — normalize to ms.
-  const aTime = a.publishedAt !== undefined ? a.publishedAt * 1000 : (dateToTimestamp(a.updated ?? a.date) ?? 0);
-  const bTime = b.publishedAt !== undefined ? b.publishedAt * 1000 : (dateToTimestamp(b.updated ?? b.date) ?? 0);
-  if (aTime !== bTime) return bTime - aTime;
-  return (b.updated || b.date || "").localeCompare(a.updated || a.date || "");
+function compareTimes(a: number | undefined, b: number | undefined): number {
+  return (b ?? 0) - (a ?? 0);
 }
 
-function dateToTimestamp(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? time : undefined;
+/**
+ * Sort for the homepage "最新笔记" / notes list: by stable publish time first,
+ * then by last update, then alphabetically by slug. Because `publishedAt` is
+ * the primary key, editing or renaming an old note never bumps it above a note
+ * that was published later.
+ */
+export function sortNotesDescending<
+  T extends { publishedAt?: number; gitUpdatedAt?: number; slug?: string; updated?: string; date?: string }
+>(a: T, b: T): number {
+  const byPublish = compareTimes(a.publishedAt, b.publishedAt);
+  if (byPublish !== 0) return byPublish;
+  const byUpdate = compareTimes(a.gitUpdatedAt, b.gitUpdatedAt);
+  if (byUpdate !== 0) return byUpdate;
+  return (a.slug ?? "").localeCompare(b.slug ?? "");
+}
+
+/**
+ * Sort for a future "最近更新" section: by last update first, then publish
+ * time, then slug.
+ */
+export function sortNotesByRecentUpdate<
+  T extends { publishedAt?: number; gitUpdatedAt?: number; slug?: string }
+>(a: T, b: T): number {
+  const byUpdate = compareTimes(a.gitUpdatedAt, b.gitUpdatedAt);
+  if (byUpdate !== 0) return byUpdate;
+  const byPublish = compareTimes(a.publishedAt, b.publishedAt);
+  if (byPublish !== 0) return byPublish;
+  return (a.slug ?? "").localeCompare(b.slug ?? "");
 }
 
 /**
  * Select the newest notes for the homepage's "最新笔记" list.
  * Sorted by `updated`/`date` descending, capped at `limit` (default 4).
  */
-export function getRecentNotes<T extends { updated?: string; date?: string }>(notes: T[], limit = 4): T[] {
+export function getRecentNotes<
+  T extends { publishedAt?: number; gitUpdatedAt?: number; slug?: string; updated?: string; date?: string }
+>(notes: T[], limit = 4): T[] {
   return [...notes].sort(sortNotesDescending).slice(0, limit);
 }
 

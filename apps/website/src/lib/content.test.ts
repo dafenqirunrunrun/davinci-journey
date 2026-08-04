@@ -8,9 +8,14 @@ import {
   getRecentNotes,
   renderNoteHtml,
   resolveDescription,
+  resolveGitUpdatedAt,
+  resolvePublishedAt,
+  sortNotesByRecentUpdate,
   sortNotesDescending,
   stripDuplicateTitleHeading
 } from "./content";
+import { GET as rssGET } from "../pages/rss.xml";
+import { GET as sitemapGET } from "../pages/sitemap.xml";
 
 const fixturePath = fileURLToPath(new URL("../../../../fixtures/website/render-test.md", import.meta.url));
 const fixture = readFileSync(fixturePath, "utf8");
@@ -267,18 +272,19 @@ describe("auto excerpt generation (empty description)", () => {
 });
 
 describe("homepage data layer", () => {
-  it("sorts notes newest-first by updated then date", () => {
+  it("sorts notes by stable publish time, then update time, then slug", () => {
     const notes = [
-      { title: "old", updated: "2026-01-01" },
-      { title: "newest", updated: "2026-06-01" },
-      { title: "dateOnly", date: "2026-03-15" },
-      { title: "noDate" }
+      { title: "olderPublish", publishedAt: 100, gitUpdatedAt: 900 },
+      { title: "newest", publishedAt: 300 },
+      { title: "tie-a", publishedAt: 200, slug: "a" },
+      { title: "tie-b", publishedAt: 200, slug: "b" }
     ];
     const sorted = [...notes].sort(sortNotesDescending);
     expect(sorted[0]!.title).toBe("newest");
-    expect(sorted[1]!.title).toBe("dateOnly");
-    expect(sorted[2]!.title).toBe("old");
-    expect(sorted[3]!.title).toBe("noDate");
+    expect(sorted[1]!.title).toBe("tie-a");
+    expect(sorted[2]!.title).toBe("tie-b");
+    // Despite being recently updated, olderPublish keeps a later slot.
+    expect(sorted[3]!.title).toBe("olderPublish");
   });
 
   it("breaks date ties by publishedAt (git commit time, unix seconds)", () => {
@@ -322,19 +328,19 @@ describe("homepage data layer", () => {
 
   it("getRecentNotes caps at 4 and keeps newest-first order", () => {
     const notes = [
-      { title: "a", updated: "2026-01-01" },
-      { title: "b", updated: "2026-06-01" },
-      { title: "c", date: "2026-03-01" },
-      { title: "d", updated: "2026-05-01" },
-      { title: "e", updated: "2026-07-01" }
+      { title: "a", publishedAt: 100 },
+      { title: "b", publishedAt: 200 },
+      { title: "c", publishedAt: 300 },
+      { title: "d", publishedAt: 400 },
+      { title: "e", publishedAt: 500 }
     ];
     const recent = getRecentNotes(notes, 4);
     expect(recent).toHaveLength(4);
-    // Newest-first: e(07-01) > b(06-01) > d(05-01) > c(03-01)
+    // Newest-first by publishedAt.
     expect(recent[0]!.title).toBe("e");
-    expect(recent[1]!.title).toBe("b");
-    expect(recent[2]!.title).toBe("d");
-    expect(recent[3]!.title).toBe("c");
+    expect(recent[1]!.title).toBe("d");
+    expect(recent[2]!.title).toBe("c");
+    expect(recent[3]!.title).toBe("b");
     expect(recent.map((n) => n.title)).not.toContain("a");
   });
 
@@ -398,5 +404,87 @@ describe("slug uniqueness gate", () => {
     // Every rendered page maps to a unique URL.
     const urls = notes.map((note) => note.urlPath);
     expect(new Set(urls).size).toBe(notes.length);
+  });
+});
+
+describe("time model", () => {
+  it("resolvePublishedAt prefers front matter publishedAt, then date, then git first commit, then mtime", () => {
+    const explicit = Math.floor(Date.parse("2026-08-05") / 1000);
+    const date = Math.floor(Date.parse("2026-08-04") / 1000);
+    expect(resolvePublishedAt({ publishedAt: "2026-08-05", date: "2026-08-04", gitFirstCommit: 100, mtime: 200 })).toBe(explicit);
+    expect(resolvePublishedAt({ date: "2026-08-04", gitFirstCommit: 100, mtime: 200 })).toBe(date);
+    expect(resolvePublishedAt({ gitFirstCommit: 100, mtime: 200 })).toBe(100);
+    expect(resolvePublishedAt({ mtime: 200 })).toBe(200);
+    expect(resolvePublishedAt({})).toBeUndefined();
+  });
+
+  it("resolveGitUpdatedAt prefers git last commit, then front matter updated, then publishedAt", () => {
+    const updated = Math.floor(Date.parse("2026-08-04") / 1000);
+    expect(resolveGitUpdatedAt({ gitLastCommit: 300, updated: "2026-08-04", publishedAt: 100 })).toBe(300);
+    expect(resolveGitUpdatedAt({ updated: "2026-08-04", publishedAt: 100 })).toBe(updated);
+    expect(resolveGitUpdatedAt({ publishedAt: 100 })).toBe(100);
+    expect(resolveGitUpdatedAt({})).toBeUndefined();
+  });
+
+  it("editing or renaming an old note does not bump it above a note published later", () => {
+    const notes = [
+      // Old note edited very recently (gitUpdatedAt newest) but published earlier.
+      { title: "old-edited", publishedAt: 100, gitUpdatedAt: 999 },
+      { title: "new-published", publishedAt: 200, gitUpdatedAt: 200 }
+    ];
+    const sorted = [...notes].sort(sortNotesDescending);
+    expect(sorted[0]!.title).toBe("new-published");
+    expect(sorted[1]!.title).toBe("old-edited");
+  });
+
+  it("same publish time falls back to gitUpdatedAt then slug for stability", () => {
+    const notes = [
+      { title: "b", publishedAt: 100, gitUpdatedAt: 100, slug: "b" },
+      { title: "a", publishedAt: 100, gitUpdatedAt: 100, slug: "a" },
+      { title: "c", publishedAt: 100, gitUpdatedAt: 300, slug: "c" }
+    ];
+    const sorted = [...notes].sort(sortNotesDescending);
+    expect(sorted.map((n) => n.title)).toEqual(["c", "a", "b"]);
+  });
+
+  it("sortNotesByRecentUpdate orders by gitUpdatedAt first", () => {
+    const notes = [
+      { title: "old-pub-new-upd", publishedAt: 100, gitUpdatedAt: 900 },
+      { title: "new-pub", publishedAt: 500, gitUpdatedAt: 500 }
+    ];
+    const sorted = [...notes].sort(sortNotesByRecentUpdate);
+    expect(sorted[0]!.title).toBe("old-pub-new-upd");
+    expect(sorted[1]!.title).toBe("new-pub");
+  });
+
+  it("renamed notes keep their pre-rename first commit as publishedAt", () => {
+    // langgraph/agent.md was renamed to langgraph-agent.md; --follow must
+    // resolve publishedAt back to the original add commit, not the rename.
+    const langgraph = getNotes().find((n) => n.slug === "langgraph-agent");
+    const agentMemory = getNotes().find((n) => n.slug === "agent-memory");
+    expect(langgraph?.publishedAt).toBeDefined();
+    expect(agentMemory?.publishedAt).toBeDefined();
+    expect(langgraph!.gitUpdatedAt!).toBeGreaterThanOrEqual(langgraph!.publishedAt!);
+    expect(agentMemory!.gitUpdatedAt!).toBeGreaterThanOrEqual(agentMemory!.publishedAt!);
+  });
+
+  it("rss uses publishedAt as pubDate and emits no duplicate note URLs", async () => {
+    const response = rssGET();
+    const text = await response.text();
+    expect(text).toContain("<pubDate>");
+    const urls = text.match(/<guid>([^<]+\/notes\/[^<]+)<\/guid>/g) ?? [];
+    const seen = new Set(urls);
+    expect(seen.size).toBe(urls.length);
+    expect(seen.size).toBeGreaterThan(0);
+  });
+
+  it("sitemap adds lastmod from gitUpdatedAt for notes and no duplicate URLs", async () => {
+    const response = sitemapGET();
+    const text = await response.text();
+    expect(text).toContain("<lastmod>");
+    const urls = text.match(/<loc>([^<]+\/notes\/[^<]+)<\/loc>/g) ?? [];
+    const seen = new Set(urls);
+    expect(seen.size).toBe(urls.length);
+    expect(seen.size).toBeGreaterThan(0);
   });
 });
