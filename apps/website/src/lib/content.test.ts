@@ -322,13 +322,13 @@ describe("homepage data layer", () => {
     expect(article?.description).not.toContain("目录");
   });
 
-  it("getNotes is sorted newest-first", () => {
+  it("getNotes is sorted newest-first by publishedAt", () => {
     const notes = getNotes();
     expect(notes.length).toBeGreaterThan(0);
     for (let i = 1; i < notes.length; i++) {
       const prev = notes[i - 1]!;
       const curr = notes[i]!;
-      expect((prev.updated || prev.date || "").localeCompare(curr.updated || curr.date || "")).toBeGreaterThanOrEqual(0);
+      expect(prev.publishedAt ?? 0).toBeGreaterThanOrEqual(curr.publishedAt ?? 0);
     }
   });
 

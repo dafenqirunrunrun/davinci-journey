@@ -303,7 +303,10 @@ function gitLogUnixSeconds(args: string[]): number | undefined {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
-    const value = Number(out);
+    // Take the first line so multi-line output (multiple matching commits)
+    // never produces NaN; callers order args so the wanted line is first.
+    const first = out.split(/\r?\n/)[0]?.trim() ?? "";
+    const value = Number(first);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return undefined;
@@ -318,9 +321,10 @@ function gitLastCommitTime(relPath: string): number | undefined {
 /**
  * Unix seconds of the FIRST git commit that introduced the file, following
  * renames (`--follow`) so renaming a file does not reset its publish time.
+ * `--reverse` orders oldest-first so the first line is the earliest add.
  */
 function gitFirstCommitTime(relPath: string): number | undefined {
-  const out = gitLogUnixSeconds(["log", "--follow", "--diff-filter=A", "--format=%ct", "--", relPath]);
+  const out = gitLogUnixSeconds(["log", "--reverse", "--follow", "--diff-filter=A", "--format=%ct", "--", relPath]);
   if (out !== undefined) return out;
   // Fall back to the oldest commit touching the path.
   return gitLogUnixSeconds(["log", "--reverse", "--format=%ct", "--", relPath]);
