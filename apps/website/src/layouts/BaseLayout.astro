@@ -490,6 +490,19 @@ const pageTitle = title === SITE_NAME ? SITE_NAME : `${title} | ${SITE_NAME}`;
     border-radius: 16px;
   }
 
+  .prose .mermaid-block {
+    margin: 1.75rem 0;
+    display: flex;
+    justify-content: center;
+    overflow-x: auto;
+    padding: 0.25rem 0;
+  }
+
+  .prose .mermaid-block svg {
+    max-width: 100%;
+    height: auto;
+  }
+
   .site-footer {
     display: flex;
     justify-content: space-between;

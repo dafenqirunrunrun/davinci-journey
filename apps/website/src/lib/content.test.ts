@@ -39,6 +39,12 @@ describe("website markdown rendering", () => {
     expect(html).not.toContain("| 名称 | 说明 |");
   });
 
+  it("preserves mermaid code blocks for the client renderer", async () => {
+    const html = await renderNoteHtml('```mermaid\nflowchart LR\n  A --> B\n```\n', "Mermaid");
+    expect(html).toContain('class="language-mermaid"');
+    expect(html).toContain("flowchart LR");
+  });
+
   it("renders the tracked fixture with exactly one h1 and correct elements", async () => {
     // Real flow passes note.body (front matter already stripped by getNotes).
     const body = fixture.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");

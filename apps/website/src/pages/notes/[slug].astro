@@ -23,3 +23,18 @@ const html = await renderNoteHtml(note.body, note.title);
     <div set:html={html} />
   </article>
 </BaseLayout>
+
+<script>
+  import { initMermaid } from "../../components/MermaidViewer";
+
+  function boot() {
+    const noteEl = document.querySelector<HTMLElement>(".prose");
+    if (noteEl) initMermaid(noteEl);
+  }
+  // Module scripts are deferred, but guard anyway so the DOM is always ready.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+</script>
