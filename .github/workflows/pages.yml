@@ -13,7 +13,9 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  # The newest push always wins: a queued deploy behind a slow one is the
+  # common cause of "deployment_queued" timeouts, so cancel the older run.
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -60,8 +62,34 @@ jobs:
     needs: build
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment-retry.outputs.page_url || steps.deployment-retry-2.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
+      # GitHub Pages occasionally returns a transient 504 or stays queued past
+      # the deploy-pages polling window. Retry up to three times with a short
+      # wait so a hiccup does not fail the whole deploy.
+      - name: Deploy to GitHub Pages (attempt 1)
         id: deployment
         uses: actions/deploy-pages@v4
+        timeout-minutes: 15
+        continue-on-error: true
+
+      - name: Wait before retry
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+
+      - name: Deploy to GitHub Pages (attempt 2)
+        id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        timeout-minutes: 15
+        continue-on-error: true
+
+      - name: Wait before retry
+        if: steps.deployment-retry.outcome == 'failure'
+        run: sleep 60
+
+      - name: Deploy to GitHub Pages (attempt 3)
+        id: deployment-retry-2
+        if: steps.deployment-retry.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        timeout-minutes: 15
