@@ -45,3 +45,14 @@ archive_profiles:
   directory: content/ai-agent/sft
   default_tags: []
   description: ''
+- id: project-review-e-review-agent
+  name: Project Review / E-Review Agent
+  category: Project Review
+  topic: E-Review Agent
+  directory: content/project-review/e-review-agent
+  default_tags:
+  - e-review-agent
+  - project-review
+  - interview
+  - agent
+  description: E-Review Agent 项目复盘、面试追问、架构设计、指标证据与真实性审计
