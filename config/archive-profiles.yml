@@ -78,3 +78,15 @@ archive_profiles:
   - hot100
   - interview
   description: LeetCode Hot100 算法学习、题解整理、代码复盘与面试刷题笔记
+- id: project-review-deepresearch
+  name: Project Review / DeepResearch
+  category: Project Review
+  topic: DeepResearch
+  directory: content/project-review/deepresearch
+  default_tags:
+  - deepresearch
+  - project-review
+  - interview
+  - multi-agent
+  - rag
+  description: DeepResearch 项目复盘、白海实习职责、Multi-Agent 架构、ResearchState、SSE、Checkpoint、Evidence/Citation 与面试追问
