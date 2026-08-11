@@ -58,6 +58,8 @@ function stubBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
     selectRepositoryRoot: vi.fn(),
     validateRepositoryRoot: vi.fn(),
     loadRepositoryTargetSettings: vi.fn(),
+    loadArchiveProfiles: vi.fn(),
+    loadExistingNoteSlugs: vi.fn(),
     inspectRemotePublish: vi.fn(),
     pushPublishCommit: vi.fn(),
     checkGithubPagesDeployment: vi.fn(),

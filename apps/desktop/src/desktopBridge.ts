@@ -446,6 +446,10 @@ export interface DesktopBridge {
   selectRepositoryRoot(): Promise<RepositoryRootResult>;
   validateRepositoryRoot(repositoryRoot: string): Promise<RepositoryRootResult>;
   loadRepositoryTargetSettings(): Promise<RepositoryRootResult | undefined>;
+  /** Load the archive profiles persisted in the target repo's config/archive-profiles.yml. */
+  loadArchiveProfiles(repositoryRoot: string): Promise<ArchiveProfile[]>;
+  /** List the non-empty slugs already present in the target repo's content/ notes. */
+  loadExistingNoteSlugs(repositoryRoot: string): Promise<string[]>;
   // Remote publish commands
   inspectRemotePublish(request: InspectRemotePublishRequest): Promise<InspectRemotePublishResult>;
   pushPublishCommit(request: PushPublishRequest): Promise<PushPublishResult>;
@@ -742,6 +746,14 @@ export function createBrowserBridge(
     async loadRepositoryTargetSettings() {
       return undefined;
     },
+    async loadArchiveProfiles() {
+      // 浏览器预览模式无法读取目标仓库，交由内置默认方案兜底。
+      return [];
+    },
+    async loadExistingNoteSlugs() {
+      // 浏览器预览模式无法读取目标仓库，无需去重。
+      return [];
+    },
     async inspectRemotePublish() {
       throw commandError("WORKSPACE_CREATE_FAILED", "浏览器预览模式不支持远程发布。");
     },
@@ -792,6 +804,8 @@ export function createTauriBridge(): DesktopBridge {
     selectRepositoryRoot: () => invokeTauri("select_repository_root"),
     validateRepositoryRoot: (repositoryRoot) => invokeTauri("validate_repository_root_command", { repositoryRoot }),
     loadRepositoryTargetSettings: () => invokeTauri("load_repository_target_settings"),
+    loadArchiveProfiles: (repositoryRoot) => invokeTauri("load_archive_profiles", { repositoryRoot }),
+    loadExistingNoteSlugs: (repositoryRoot) => invokeTauri("load_existing_note_slugs", { repositoryRoot }),
     inspectRemotePublish: (request) => invokeTauri("inspect_remote_publish_command", { request }),
     pushPublishCommit: (request) => invokeTauri("push_publish_commit_command", { request }),
     checkGithubPagesDeployment: (request) => invokeTauri("check_github_pages_deployment_command", { request }),

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   applyArchiveProfileChanges,
   createArchiveProfile,
+  ensureUniqueSlug,
   getArchivePathPreview,
   recommendArchiveProfile,
   slugify,
@@ -11,7 +12,7 @@ import {
   type NewArchiveProfileInput
 } from "@davinci-journey/classification";
 import { normalizeLeadingTitleHeading, parseMarkdown } from "@davinci-journey/markdown-core";
-import { initialArchiveProfiles } from "../archiveProfiles";
+import { initialArchiveProfiles, mergeArchiveProfiles } from "../archiveProfiles";
 import { createBrowserBridge, createDesktopBridge, desktopErrorMessage, isCancelError, type DeploymentCheckResult, type DesktopBridge, type InspectRemotePublishResult, type PrePublishCheckResult, type PublishLockStatus, type PushPublishResult, type RepositoryRootResult, type SelectedMarkdownFileDto, type StageTransactionResult } from "../desktopBridge";
 import { canContinueFromAssets, emptyDraft, type PublishDraft, type RemotePublishState, type RemotePublishStatus, type ResolvedImageDependency, type SelectedMarkdownFile } from "../publishState";
 import { getPublishWriteEligibility, publishWriteBlockReasonText } from "../publishWriteEligibility";
@@ -46,7 +47,12 @@ function makeSlug(value: string, fallback: string): string {
   return slugify(value.replace(/\.[^.]+$/, "")) || slugify(fallback) || "untitled-note";
 }
 
-export async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto, profiles: ArchiveProfile[], bridge: DesktopBridge): Promise<PublishDraft> {
+export async function createDraftFromFile(
+  markdownFile: SelectedMarkdownFileDto,
+  profiles: ArchiveProfile[],
+  bridge: DesktopBridge,
+  existingSlugs: readonly string[] = []
+): Promise<PublishDraft> {
   const parsedDocument = parseMarkdown({ fileName: markdownFile.fileName, content: markdownFile.content });
   const recommendation = recommendArchiveProfile(
     {
@@ -58,7 +64,10 @@ export async function createDraftFromFile(markdownFile: SelectedMarkdownFileDto,
     profiles
   );
   const title = parsedDocument.title ?? markdownFile.fileName.replace(/\.[^.]+$/, "");
-  const slug = typeof parsedDocument.frontMatter.slug === "string" ? parsedDocument.frontMatter.slug : makeSlug(title, markdownFile.fileName);
+  const slug = ensureUniqueSlug(
+    typeof parsedDocument.frontMatter.slug === "string" ? parsedDocument.frontMatter.slug : makeSlug(title, markdownFile.fileName),
+    existingSlugs
+  );
   const selectedProfile = recommendation.archiveProfileId;
   const profile = profiles.find((item) => item.id === selectedProfile) ?? profiles[0]!;
   const preview = getArchivePathPreview(profile, slug);
@@ -127,7 +136,8 @@ export function updatePreview(draft: PublishDraft, profiles: ArchiveProfile[]): 
 
 export function PublishFlow() {
   const [step, setStep] = useState(1);
-  const [baseProfiles] = useState(initialArchiveProfiles);
+  const [baseProfiles, setBaseProfiles] = useState<ArchiveProfile[]>(initialArchiveProfiles);
+  const [existingSlugs, setExistingSlugs] = useState<string[]>([]);
   const [draft, setDraft] = useState<PublishDraft>(emptyDraft);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<NewArchiveProfileInput>(emptyForm);
@@ -184,6 +194,8 @@ export function PublishFlow() {
           ...current,
           repository: { ...current.repository, repositoryRootResult: result }
         }));
+        void refreshArchiveProfiles(result.repositoryRoot);
+        void refreshExistingSlugs(result.repositoryRoot);
       })
       .catch(() => undefined);
     return () => {
@@ -191,8 +203,45 @@ export function PublishFlow() {
     };
   }, [bridge]);
 
+  /**
+   * Reload the persisted archive profiles from the target repo's
+   * `config/archive-profiles.yml` so profiles created in an earlier publish
+   * survive into new drafts (previously they only lived in one draft and were
+   * silently lost, forcing the user to re-create them). Called on repo select,
+   * app start, and after a successful commit.
+   */
+  async function refreshArchiveProfiles(repositoryRoot?: string) {
+    if (!repositoryRoot) return;
+    try {
+      const loaded = await bridge.loadArchiveProfiles(repositoryRoot);
+      if (Array.isArray(loaded) && loaded.length > 0) {
+        setBaseProfiles(mergeArchiveProfiles(loaded));
+      }
+    } catch {
+      // 读取仓库归档配置失败时保留当前方案，不打断发布流程。
+    }
+  }
+
+  /**
+   * Reload the set of slugs already used in the repo's `content/**` notes.
+   * When the new note's slug collides with one of these, `createDraftFromFile`
+   * appends a `-2`/`-3`… suffix so the website build never fails on a
+   * duplicate slug again.
+   */
+  async function refreshExistingSlugs(repositoryRoot?: string) {
+    if (!repositoryRoot) return;
+    try {
+      const loaded = await bridge.loadExistingNoteSlugs(repositoryRoot);
+      if (Array.isArray(loaded)) {
+        setExistingSlugs(loaded);
+      }
+    } catch {
+      // 读取现有 slug 失败时保留当前集合，去重退化为仅基于已加载数据的尽力而为。
+    }
+  }
+
   async function loadMarkdownFile(markdownFile: SelectedMarkdownFileDto, activeBridge: DesktopBridge) {
-    const next = updatePreview(await createDraftFromFile(markdownFile, profiles, activeBridge), profiles);
+    const next = updatePreview(await createDraftFromFile(markdownFile, profiles, activeBridge, existingSlugs), profiles);
     setDraft({ ...next, repository: { repositoryRootResult: repositoryTarget } });
     setStep(2);
   }
@@ -261,6 +310,8 @@ export function PublishFlow() {
     setRepositoryTarget(result);
     if (result.repositoryRoot) {
       void bridge.inspectPublishLock(result.repositoryRoot).then(setPublishLock).catch(() => setPublishLock(undefined));
+      void refreshArchiveProfiles(result.repositoryRoot);
+      void refreshExistingSlugs(result.repositoryRoot);
     } else {
       setPublishLock(undefined);
     }
@@ -504,6 +555,12 @@ export function PublishFlow() {
         repository: { ...current.repository, commitResult, failedStage: undefined }
       }));
       await refreshPublishLock(getRepositoryRootForWrite());
+      // The commit persisted any newly created archive profiles to the repo
+      // config; reload the base list so the next draft sees them immediately.
+      void refreshArchiveProfiles(getRepositoryRootForWrite());
+      // The commit added a new note with its (possibly deduped) slug; refresh so
+      // the next draft dedupes against it too.
+      void refreshExistingSlugs(getRepositoryRootForWrite());
     } catch (error) {
       setDraft((current) => ({ ...current, status: "commit_failed", error: desktopErrorMessage(error), repository: { ...current.repository, failedStage: "commit" } }));
       await refreshPublishLock(getRepositoryRootForWrite());
@@ -797,7 +854,7 @@ export function PublishFlow() {
 
       {step === 1 &&
         (batchOpen ? (
-          <BatchPublishFlow profiles={profiles} repositoryRoot={repoRoot} onClose={() => setBatchOpen(false)} />
+          <BatchPublishFlow profiles={profiles} repositoryRoot={repoRoot} existingSlugs={existingSlugs} onClose={() => setBatchOpen(false)} />
         ) : (
         <div className="panel upload-panel" onDragOver={(event) => event.preventDefault()}>
           <p className="eyebrow">第 1 步</p>
@@ -914,7 +971,7 @@ export function PublishFlow() {
             <StepHeader title={selectedProfile?.name ?? "未选择"} eyebrow="最终结果预览" />
             <PathBlock title="Markdown" value={draft.preview.markdownPath ?? ""} testId="markdown-path" />
             <PathBlock title="图片资源" value={draft.preview.assetDirectory ?? ""} testId="image-path" />
-            {draft.archive.pendingProfileChanges.length > 0 && <p className="warning-text">新建归档方案只保存在当前发布草稿中，正式发布时一并写入。</p>}
+            {draft.archive.pendingProfileChanges.length > 0 && <p className="warning-text">新建归档方案将在正式发布时写入 config/archive-profiles.yml，之后会自动出现在“全部归档方案”中。</p>}
             <StepActions onBack={() => setStep(3)} onNext={() => setStep(5)} />
           </aside>
           {showCreate && (

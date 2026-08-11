@@ -2,7 +2,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::OsStr,
     fs,
     path::{Component, Path, PathBuf},
@@ -30,6 +30,7 @@ use services::repository_publish::{
     StageTransactionRequest, StageTransactionResult,
 };
 use services::repository_transaction::PublishLockStatus;
+use services::archive_config_writer::{load_archive_config, ArchiveProfileEntry};
 
 const MAX_MARKDOWN_SIZE: u64 = 10 * 1024 * 1024;
 const WORKSPACE_VERSION: u8 = 1;
@@ -765,6 +766,102 @@ fn load_repository_target_settings() -> CommandResult<Option<RepositoryRootResul
     Ok(Some(validate_repository_root(&stored.repository_root)))
 }
 
+/// Load the archive profiles persisted in the target repo's
+/// `config/archive-profiles.yml`. This is the single source of truth for the
+/// "全部归档方案" list, so profiles created in a previous publish survive
+/// across app restarts and new drafts.
+#[tauri::command]
+fn load_archive_profiles(repository_root: String) -> CommandResult<Vec<ArchiveProfileDto>> {
+    // Resolve through the security guard so an invalid/unsafe path is rejected
+    // before any file is read; a non-selected repo simply yields no profiles.
+    let resolved = security::repository_guard::resolve_repository_root(&repository_root);
+    if !resolved.valid || resolved.repository_root.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config_path = PathBuf::from(&resolved.repository_root)
+        .join("config")
+        .join("archive-profiles.yml");
+    if !config_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let entries = load_archive_config(&config_path).map_err(|e| CommandErrorDto {
+        code: "ARCHIVE_CONFIG_CHANGED".to_string(),
+        message: e,
+        technical_message: None,
+        affected_path: Some("config/archive-profiles.yml".to_string()),
+        recoverable: true,
+    })?;
+    Ok(entries.into_iter().map(archive_entry_to_dto).collect())
+}
+
+fn archive_entry_to_dto(entry: ArchiveProfileEntry) -> ArchiveProfileDto {
+    ArchiveProfileDto {
+        id: entry.id,
+        name: entry.name,
+        category: entry.category,
+        topic: entry.topic,
+        directory: entry.directory,
+        default_tags: entry.default_tags,
+        description: entry.description,
+    }
+}
+
+/// Read the `slug` field from a markdown file's leading YAML front matter.
+/// Returns None when the file has no front matter or no non-empty slug, so
+/// notes without an explicit slug are simply skipped (they get one at build
+/// time from their filename).
+fn extract_front_matter_slug(text: &str) -> Option<String> {
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---").or_else(|| rest.find("\r\n---"))?;
+    let front = &rest[..end];
+    let parsed: serde_yaml::Value = serde_yaml::from_str(front).ok()?;
+    match parsed.get("slug") {
+        Some(serde_yaml::Value::String(value)) if !value.trim().is_empty() => {
+            Some(value.trim().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// List every non-empty `slug` already present in the repo's `content/**`
+/// notes. The publish flow uses this to auto-deduplicate a new note's slug,
+/// so a freshly created note can never collide with an existing one and break
+/// the website build gate.
+#[tauri::command]
+fn load_existing_note_slugs(repository_root: String) -> CommandResult<Vec<String>> {
+    let resolved = security::repository_guard::resolve_repository_root(&repository_root);
+    if !resolved.valid || resolved.repository_root.is_empty() {
+        return Ok(Vec::new());
+    }
+    let content_dir = PathBuf::from(&resolved.repository_root).join("content");
+    if !content_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut slugs = BTreeSet::new();
+    for entry in WalkDir::new(&content_dir).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if !name.ends_with(".md") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Some(slug) = extract_front_matter_slug(&text) {
+            slugs.insert(slug);
+        }
+    }
+    Ok(slugs.into_iter().collect())
+}
+
 // ─── Repository Publish Commands ────────────────────────────────────────────
 
 #[tauri::command]
@@ -989,6 +1086,8 @@ pub fn run() {
             select_repository_root,
             validate_repository_root_command,
             load_repository_target_settings,
+            load_archive_profiles,
+            load_existing_note_slugs,
             inspect_repository_publish,
             apply_publish_workspace_command,
             get_publish_diff_command,

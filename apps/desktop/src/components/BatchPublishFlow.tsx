@@ -57,6 +57,8 @@ type BatchView = "queue" | "review" | "executing" | "push" | "results";
 export interface BatchPublishFlowProps {
   profiles: ArchiveProfile[];
   repositoryRoot?: string;
+  /** Slugs already present in the repo's content/**; batch items dedupe against them and against each other. */
+  existingSlugs?: readonly string[];
   onClose: () => void;
 }
 
@@ -109,7 +111,7 @@ function stageLabel(stage?: BatchItemStage): string {
 
 const WRITTEN_STATUSES = ["written", "committing", "committed"] as const;
 
-export function BatchPublishFlow({ profiles, repositoryRoot, onClose }: BatchPublishFlowProps) {
+export function BatchPublishFlow({ profiles, repositoryRoot, existingSlugs, onClose }: BatchPublishFlowProps) {
   const [batch, setBatch] = useState<BatchPublishState>(() => createEmptyBatchState());
   const [view, setView] = useState<BatchView>("queue");
   const [reviewingId, setReviewingId] = useState<string | undefined>();
@@ -126,6 +128,20 @@ export function BatchPublishFlow({ profiles, repositoryRoot, onClose }: BatchPub
   useEffect(() => {
     batchRef.current = batch;
   }, [batch]);
+
+  // Slugs already used in the repo (from the single-publish flow) plus those
+  // claimed by earlier items in this batch, so consecutive notes never collide
+  // with each other either. Re-seeded whenever the parent refreshes the set.
+  const usedSlugsRef = useRef<string[]>(existingSlugs ? [...existingSlugs] : []);
+  useEffect(() => {
+    usedSlugsRef.current = [...(existingSlugs ?? [])];
+  }, [existingSlugs]);
+
+  async function buildBatchDraft(dto: SelectedMarkdownFileDto): Promise<PublishDraft> {
+    const draft = await createDraftFromFile(dto, profiles, batchBridge, usedSlugsRef.current);
+    usedSlugsRef.current.push(draft.article.slug);
+    return draft;
+  }
 
   const batchBridge = useMemo<DesktopBridge>(
     () =>
@@ -188,7 +204,7 @@ export function BatchPublishFlow({ profiles, repositoryRoot, onClose }: BatchPub
     void (async () => {
       try {
         const dto = await batchBridge.readMarkdownPath({ path: item?.sourcePath ?? "" });
-        const draft = await createDraftFromFile(dto, profiles, batchBridge);
+        const draft = await buildBatchDraft(dto);
         if (!active) return;
         setBatch((current) => attachDraft(current, reviewingId, draft));
       } catch (error) {
@@ -358,7 +374,7 @@ export function BatchPublishFlow({ profiles, repositoryRoot, onClose }: BatchPub
     for (const item of missing) {
       try {
         const dto = await batchBridge.readMarkdownPath({ path: item.sourcePath });
-        const draft = await createDraftFromFile(dto, profiles, batchBridge);
+        const draft = await buildBatchDraft(dto);
         setBatch((current) => updateItemDraft(current, item.id, draft));
       } catch (error) {
         setBatchError(`无法重新读取「${item.displayName}」：${desktopErrorMessage(error)}`);

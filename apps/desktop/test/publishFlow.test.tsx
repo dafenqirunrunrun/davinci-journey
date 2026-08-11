@@ -63,7 +63,7 @@ describe("PublishFlow", () => {
     fireEvent.change(screen.getByLabelText("专题"), { target: { value: "Durable Execution" } });
     fireEvent.click(screen.getByText("创建并选中"));
     expect(screen.getByTestId("markdown-path")).toHaveTextContent("content/ai-agent/durable-execution/langgraph-checkpoint.md");
-    expect(screen.getByText(/正式发布时一并写入/)).toBeInTheDocument();
+    expect(screen.getByText(/正式发布时写入 config\/archive-profiles.yml/)).toBeInTheDocument();
   });
 
   it("最终路径预览正确且不显示发布成功", async () => {
