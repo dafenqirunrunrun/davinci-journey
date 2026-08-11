@@ -67,3 +67,14 @@ archive_profiles:
   - study-notes
   - review
   description: 每日 AI Agent 学习记录、技术笔记、知识整理与面试复习
+- id: algorithm-leetcode-hot100
+  name: Algorithm / LeetCode Hot100
+  category: Algorithm
+  topic: LeetCode Hot100
+  directory: content/algorithm/leetcode-hot100
+  default_tags:
+  - algorithm
+  - leetcode
+  - hot100
+  - interview
+  description: LeetCode Hot100 算法学习、题解整理、代码复盘与面试刷题笔记
