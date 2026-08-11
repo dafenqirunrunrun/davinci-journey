@@ -5,7 +5,7 @@ date: "2026-08-11"
 description: ""
 draft: false
 featured: false
-slug: "8"
+slug: "daily-learning-8-11-agent-context-durable-execution"
 title: "每日学习 8.11｜Agent 状态管理、Context 生命周期、Durable Execution 与幂等"
 topic: "AI Agent"
 updated: "2026-08-11"
