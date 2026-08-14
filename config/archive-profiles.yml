@@ -90,3 +90,10 @@ archive_profiles:
   - multi-agent
   - rag
   description: DeepResearch 项目复盘、白海实习职责、Multi-Agent 架构、ResearchState、SSE、Checkpoint、Evidence/Citation 与面试追问
+- id: project-review-ds
+  name: Project Review / ds
+  category: Project Review
+  topic: ds
+  directory: content/project-review/ds
+  default_tags: []
+  description: ds项目的复盘和改进
